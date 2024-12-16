@@ -1,0 +1,516 @@
+---
+title: "Posterior perdictive checks"
+author: "LV"
+date: "2024-01-10"
+output: html_document
+---
+
+Posterior predictions based on experimental data and estimated parameters
+
+# Get environment right
+```{r}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load("renv", "here", "knitr", "dplyr")
+
+here::i_am("flag_project_root.R")
+here::here()
+data_path = here::here()
+
+#renv::activate(project=here::here())
+renv::restore(project=here::here()) #when asked to activate: NO!
+#renv::snapshot()
+
+packages <- c("ggplot2", "dplyr", "stats","lme4", "here", "renv","gtools", "see","plotrix","modelbased","emmeans", "performance", "tidyverse", "ggsignif","broom","quickpsy", "ggpubr", "performance","glmmTMB", "loo", "bayesplot","rlang","bayestestR", "rstan","brms","tidybayes","sjPlot","sjmisc","yardstick","effectsize","datawizard","esc","grid","lsr","gridExtra")
+
+# load the packages from lock 
+lapply(packages, library, character.only = TRUE)
+```
+
+
+#load all needed packages + paths
+```{r}
+required_packages <- c("ggplot2", "dplyr", "stats","lme4", "here", "renv", "datawizard","gtools", "see","plotrix","modelbased","emmeans", "performance", "wesanderson", "tidyverse", "ggsignif", "ggpubr")
+
+invisible(lapply(required_packages, require, character.only = TRUE))
+#renv::restore()
+here::i_am("flag_project_root.R")
+data_path = here::here()
+```
+
+#### Source everything
+```{r}
+source_path = file.path(here::here('modeling/ML/Models'), fsep = .Platform$file.sep)
+source_files = list.files(source_path, pattern = "[.][rR]$", full.names = TRUE, recursive = TRUE)
+source(here::here('modeling', 'ML', "helper_func.R"))
+source(here::here('modeling', 'ML', "Models", "all_models.R"))
+
+
+```
+
+
+# Variables needed for simulation
+```{r}
+nStim = 9 #number of stimuli in stimulus space (Generalisation + CS+)
+nSamples =4 #number of sample (how often to repeat rating for a stimulus)
+mean = 0 # CS+ 
+xmin = -4 
+xmax = 4
+NLtrials =24 #trials in conditioning  
+NGtrials= 36 # trials in generalisation 
+cspos = 5 #CS+ position 
+xs = seq(xmin, xmax, by=((xmax - (xmin))/(nStim - 1))) #stimulus space -4:4
+text_size =12
+lai = 5 #number of bins
+```
+
+
+# Get data
+```{r}
+# Get exp. data for schedules and trial sequences
+df_exp<- read.csv(paste0(here::here(), "/modeling/ML/Data/df_forfitting.csv" ),header = TRUE)
+
+# Get ppt. data, fitted parameters
+dfg <- read.csv(paste0(data_path, "/data/processed/dfgen.csv"),header = TRUE) #full df with fitted parameters & co 
+pdf0 <- dfg %>%
+  group_by(subject,rr, pu, lambda, omega, offset, bestfit) %>%
+  summarise_at("response", funs(mean,std.error),na.rm = TRUE)
+
+# Rename 
+pdf0$rr <- sub("low", "1", pdf0$rr)
+pdf0$rr <- sub("mid", "2", pdf0$rr)
+pdf0$rr <- sub("high", "3", pdf0$rr)
+pdf0$pu <- sub(1, "2", pdf0$pu)
+pdf0$pu <- sub(0, "1", pdf0$pu)
+pdf0$sub <- pdf0$subject
+pdf0$cond <- paste0("R", pdf0$rr, "P", pdf0$pu)
+ndf <- pdf0
+```
+
+# Posterior predictive checks: Value model 
+```{r}
+dfsubset = dfg[dfg$bestfit == "VALUE",]
+subject = unique(dfsubset$subject)
+
+gm = 'value_alt_offset'
+dfsim = data.frame()
+dftrials = data.frame()
+
+for (sub in c(subject)) {
+  for (cond in c(0:5)){ #loop over conditions
+    #load generalisation data 
+    dfs = df_exp[df_exp$subject %in% sub & df_exp$condition %in% cond,] #get subject data
+    df_sub = dfs[dfs$task %in% 1,] # get generalisation trials
+    df_sub$total_n = c(1: nrow(df_sub))
+    rrr = unique(df_sub$rr)
+    ppp = unique(df_sub$pu)
+
+    #get last learning values and use as starting values
+    df_learn_info = dfs[dfs$task %in% 0 & dfs$n_total == 24, ] # get generalisation trials from learning
+    df_learn_info <- df_learn_info$response
+
+    data = list('nSubj' =length(unique(df_exp$sub)), 'sub' = sub, 'reward' = df_sub$reward, 'trial_sequence' = df_sub$stimulus, 'pu_vec' = df_sub$pu, 'ou_vec' = df_sub$ou,'current_n' = df_sub$n_total,'task' = df_sub$task, response = df_sub$response, 'total_n' = df_sub$n_total, 'condition' = df_sub$condition, 'learn_info' = df_learn_info, 'xs' = xs)
+
+    # add fitted parameter values 
+    conf = list('model_name'= gm,'nStim' =nStim, 'cspos' = 5,'get_loglik' = 0)
+      
+    conf$params2estimate <- c("omega","lambda","offset")
+    params = list('omega'=ndf[ndf$sub %in% sub & ndf$pu %in% ppp & ndf$rr %in% rrr,]$omega , 'lambda'=ndf[ndf$sub %in% sub & ndf$pu %in% ppp& ndf$rr %in% rrr,]$lambda, 'offset' = ndf[ndf$sub %in% sub & ndf$pu %in% ppp& ndf$rr %in% rrr,]$offset)
+  
+    # Fit model 
+    gen_sim = rw_value_alt_offset_gen(data, params, conf, pepr)
+    gen_sim$rr = rrr
+    dfsim = rbind(dfsim, gen_sim)   
+  } 
+}
+```
+
+
+# Bring data in right format
+```{r}
+dfsim$cond <- paste0("R", dfsim$rr, "P", dfsim$pu)
+dff <- merge(dfsim, pdf0, by=c("sub","rr","pu"))
+dff = dff[dff$bestfit == "VALUE",]
+dff$omega_cat <- ifelse(dff$omega >= 0.5, "gaussian", "linear")
+
+# Standardise within ppt and condition
+dfgC <- dff %>%
+  group_by(sub, rr, pu) %>%
+  mutate(response_normalized = (y - min(y)) / (max(y) - min(y)))
+
+# Group by pattern
+dfgC$group[dfgC$omega_cat == "linear" & dfgC$bestfit == "VALUE"] = "VALUELIN"
+dfgC$group[dfgC$omega_cat == "gaussian" & dfgC$bestfit == "VALUE"] = "VALUEGAUSS"
+dfgC$distance = abs(dfgC$stimulus)
+
+# Bin and count
+NAH <- dfgC %>%
+  group_by(subject) %>%
+  mutate(bins = cut(response_normalized, breaks = lai, labels = FALSE)) %>%
+  group_by(subject, bins, group, distance) %>%
+  summarise(Count = n(), .groups = "drop")
+
+# Summarize data and calculate statistics
+NAH2 <- NAH %>%
+  group_by(bins, group, distance) %>%
+  summarise(
+    mean = mean(Count, na.rm = TRUE),
+    std.error = sd(Count, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+# Process data for percentages and layering
+result <- NAH2 %>%
+  group_by(group, distance) %>%
+  mutate(
+    total_gui = sum(mean),
+    percentage = mean / total_gui * 100,
+    row_group = "Row 2: VALUE Models",  # Single valid group
+    alpha_value = 0.5  # Fixed alpha for VALUE models
+  ) %>%
+  ungroup() %>%
+  mutate(
+    group = factor(group, levels = c("VALUEGAUSS", "VALUELIN"))  # Ensure ordering
+  )
+```
+
+
+# Posterior predictive checks: Perceptual model 
+```{r}
+ndf<- read.csv(paste0(data_path, "/outputs/fitting/fittedparameters_perceptualmodel.csv" ),header = TRUE)
+subject = unique(ndf$sub)
+
+# make pretty
+ndf$rr <- sub("25", "1", ndf$rr)
+ndf$rr <- sub("50", "2", ndf$rr)
+ndf$rr <- sub("75", "3", ndf$rr)
+ndf$pu <- sub("low", "1", ndf$pu)
+ndf$pu <- sub("high", "2", ndf$pu)
+ndf$cond <- paste0("R", ndf$rr, "P", ndf$pu)
+
+dfsubset = dfg[dfg$bestfit == "PERC",]
+subject = unique(dfsubset$subject)
+
+gm = 'perc'
+dfsim = data.frame()
+dftrials = data.frame()
+
+for (sub in c(subject)) {
+  for (cond in c(0:5)){ #loop over conditions
+    #load generalisation data 
+    dfs = df_exp[df_exp$subject %in% sub & df_exp$condition %in% cond,] #get subject data
+    df_sub = dfs[dfs$task %in% 1,] # get generalisation trials
+    df_sub$total_n = c(1: nrow(df_sub))
+    rrr = unique(df_sub$rr)
+    ppp = unique(df_sub$pu)
+
+    #get last learning values and use as starting values
+    df_learn_info = dfs[dfs$task %in% 0 & dfs$n_total == 24, ] # get generalisation trials from learning
+    df_learn_info <- df_learn_info$response
+
+    data = list('nSubj' =length(unique(df_exp$sub)), 'sub' = sub, 'reward' = df_sub$reward, 'trial_sequence' = df_sub$stimulus, 'pu_vec' = df_sub$pu, 'ou_vec' = df_sub$ou,'current_n' = df_sub$n_total,'task' = df_sub$task, response = df_sub$response, 'total_n' = df_sub$n_total, 'condition' = df_sub$condition, 'learn_info' = df_learn_info, 'xs' = xs)
+
+    # add fitted parameter values 
+    conf = list('model_name'= gm,'nStim' =nStim, 'cspos' = 5,'get_loglik' = 0)
+    conf$params2estimate <- c("rho")
+    params = list('rho' = ndf[ndf$sub %in% sub & ndf$pu %in% ppp& ndf$rr %in% rrr,]$rho)
+    
+    # Fit model 
+    gen_sim = rw_perc_est_gen(data, params, conf, pepr)
+    gen_sim$rr = rrr
+    dfsim = rbind(dfsim, gen_sim)   
+  } 
+} 
+```
+
+
+# Format
+```{r}
+dff <- merge(dfsim, pdf0, by=c("sub","rr","pu"))
+dff = dff[dff$bestfit == "PERC",]
+
+#standardise within ppt and condition
+dfgC <- dff %>%
+  group_by(sub, rr, pu) %>%
+  mutate(response_normalized = (y - min(y)) / (max(y) - min(y)))
+
+#handle cases with only one row, where max-min returns NA
+dfgC <- dff %>%
+  group_by(sub, rr, pu) %>%
+  mutate(response_normalized = (y - min(y)) / (max(y) - min(y))) %>%
+  ungroup() %>%  # Ungroup to apply filter globally
+  filter(!is.na(response_normalized))  # Remove rows where response_normalized is NA
+
+# Set group to "PERC"
+dfgC$group <- "PERC"
+dfgC$distance <- abs(dfgC$stimulus)
+
+# Bin and count
+NAH <- dfgC %>%
+  group_by(subject) %>%
+  mutate(bins = cut(response_normalized, breaks = lai, labels = FALSE)) %>%
+  group_by(subject, bins, group, distance) %>%
+  summarise(Count = n()) %>%
+  ungroup()
+
+# Summarize data and calculate statistics
+NAH2 <- NAH %>%
+  group_by(bins, group, distance) %>%
+  summarise(
+    mean = mean(Count, na.rm = TRUE),
+    std.error = sd(Count, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  )
+
+# Process data for percentages and layering
+result2 <- NAH2 %>%
+  group_by(group, distance) %>%
+  mutate(
+    total_gui = sum(mean),
+    percentage = mean / total_gui * 100,
+    row_group = "Row 1: PERC Models"  # Correct row group
+  ) %>%
+  ungroup()
+```
+
+#Combine perceptual and value simulations 
+```{r}
+result2$alpha_value = NA
+df_combined <- rbind(result, result2)
+```
+
+
+# Plot posterior predictive check histograms
+```{r}
+  # Labels for facets
+    row_group.labs <- c("Perceptual", "Value")
+    names(row_group.labs) <- c("Row 1: PERC", "Row 2: VALUE Models")
+
+    text_size <- 20
+
+    # Updated legend labels and title
+    legend_labels <- c("Perceptual", "Value: Gauss", "Value: Monotonic")
+
+    # Updated plot
+df_combined$group <- factor(df_combined$group, levels = c("PERC", "VALUEGAUSS", "VALUELIN"))
+
+# Plot the graph
+go <- ggplot(data = df_combined, aes(x = factor(bins), y = percentage, fill = group)) +
+  geom_bar(
+    stat = "identity",
+    position = "identity",
+    aes(alpha = alpha_value)  # Apply alpha based on group
+  ) +
+  theme_classic() +
+  facet_grid(row_group ~ distance, labeller = labeller(
+    distance = c("0" = "CS+", "1" = "+/-1", "2" = "+/-2", "3" = "+/-3", "4" = "+/-4")
+  )) +
+  theme(aspect.ratio = 1) +
+  scale_fill_manual(
+    name = "Model",  # Set the legend title here
+    values = c("PERC" = "orange", "VALUEGAUSS" = "#479FF8", "VALUELIN" = "#EB539F"),  # Explicit mapping of colors
+    labels = c("Perceptual", "Value: Gauss", "Value: Monotonic")  # Ensure legend labels match
+  ) +
+  scale_alpha_identity() +  # Use alpha values from the data
+  ylab("%") +
+  xlab("Binned Expectancy Ratings") +
+  theme(
+    axis.title.y = element_text(margin = margin(t = 0, r = 15, b = 0, l = 0)),
+    axis.title.x = element_text(vjust = -0.4),
+    axis.line.x.bottom = element_line(size = 0.8),
+    axis.line.y.left = element_line(size = 0.8),
+    text = element_text(size = text_size),
+    legend.position = "top"
+  )
+
+# Display the plot
+go
+```
+
+
+# Participant data 
+```{r}
+#standardise within ppt and condition
+dfgC <- dfg %>%
+  group_by(subject, rr, pu) %>%
+  mutate(response_normalized = (response - min(response)) / (max(response) - min(response)))
+dfgC$response = as.numeric(dfgC$response)
+dfgC$omega_cat <- ifelse(dfgC$omega >= 0.5, "gaussian", "linear")
+
+dfgC$group = "PERC"
+dfgC$group[dfgC$omega_cat == "linear" & dfgC$bestfit == "VALUE"] = "VALUELIN"
+dfgC$group[dfgC$omega_cat == "gaussian" & dfgC$bestfit == "VALUE"] = "VALUEGAUSS"
+
+#bin and count
+NAH <- dfgC[dfgC$rulereverted != "flat",] %>%
+  group_by(subject) %>%
+  mutate(bins = cut(response_normalized, breaks = lai, labels = FALSE)) %>%
+  group_by(subject, bins, group, distance) %>%
+  summarise(Count = n()) %>%
+  ungroup()
+
+# Summarize data and calculate statistics
+    NAH2 <- NAH %>%
+      group_by(bins, group, distance) %>%
+      summarise(
+        mean = mean(Count, na.rm = TRUE),
+        std.error = sd(Count, na.rm = TRUE) / sqrt(n())
+      )
+
+    # Process data for percentages and layering
+    result_data <- NAH2 %>%
+      group_by(group, distance) %>%
+      mutate(
+        total_gui = sum(mean),
+        percentage = mean / total_gui * 100,
+        row_group = ifelse(group == "PERC", "Row 1: PERC", "Row 2: VALUE Models"),
+        alpha_value = ifelse(group == "PERC", 1, 0.5) # Set alpha for groups
+      ) %>%
+      ungroup() %>%
+      mutate(
+        group = factor(group, levels = c("PERC", "VALUEGAUSS", "VALUELIN")) # Ensure blue is above pink
+      )
+```
+
+
+# Plot
+```{r}
+    # Labels for facets
+    row_group.labs <- c("Perceptual", "Value")
+    names(row_group.labs) <- c("Row 1: PERC", "Row 2: VALUE Models")
+
+    text_size <- 20
+
+    # Updated legend labels and title
+    legend_labels <- c("Perceptual", "Value: Gauss", "Value: Monotonic")
+
+    # Updated plot
+    go <- ggplot(data = result_data, aes(x = factor(bins), y = percentage, fill = group)) +
+      geom_bar(
+        stat = "identity",
+        position = "identity",
+        aes(alpha = alpha_value)  # Apply alpha based on group
+      ) +
+      theme_classic() +
+      facet_grid(row_group ~ distance, labeller = labeller(row_group = row_group.labs)) +
+      theme(aspect.ratio = 1) +
+      scale_fill_manual(
+        name = "Model",  # Set the legend title here
+        values = c("orange", "#479FF8", "#EB539F"),  # Colors for the groups
+        labels = legend_labels  # Update legend labels
+      ) +
+      scale_alpha_identity() +  # Use alpha values from the data
+      ylab("%") +
+      xlab("Binned Expectancy Ratings") +
+      theme(
+        axis.title.y = element_text(margin = margin(t = 0, r = 15, b = 0, l = 0)),
+        axis.title.x = element_text(vjust = -0.4),
+        axis.line.x.bottom = element_line(size = 0.8),
+        axis.line.y.left = element_line(size = 0.8),
+        text = element_text(size = text_size),
+        legend.position = "top"
+      )
+
+    go
+
+
+
+
+```
+
+
+
+# Fig. 4c, histograms combining data and posterior predictive checks
+```{r}
+legend_labels <- c("Perceptual", "Value: Gauss", "Value: Monotonic")
+
+df_combined_complete <- df_combined %>%
+  tidyr::complete(
+    bins, 
+    distance = 0:4, 
+    group, 
+    fill = list(percentage = 0)  # Fill missing percentage values with 0
+  ) %>%
+  mutate(
+    row_group = case_when(
+      group == "PERC" ~ "Perceptual",
+      group == "VALUEGAUSS" ~ "Value: Gauss",
+      group == "VALUELIN" ~ "Value: Monotonic"
+    )
+  )
+
+result_data <- result_data %>%
+  mutate(
+    row_group = case_when(
+      group == "PERC" ~ "Perceptual",
+      group == "VALUEGAUSS" ~ "Value: Gauss",
+      group == "VALUELIN" ~ "Value: Monotonic"
+    )
+  )
+
+
+go <- ggplot(data = result_data, aes(x = factor(bins), y = percentage, fill = group)) +
+  geom_bar(
+    stat = "identity",
+    position = "identity",
+    aes(alpha = 0.5) 
+  ) +
+  geom_point(
+    data = df_combined_complete,
+    aes(
+      x = factor(bins), 
+      y = percentage, 
+      color = group,
+      fill = group
+    ),
+    size = 1.5,  
+    shape = 23,  
+    inherit.aes = FALSE 
+  ) +
+  geom_smooth(
+    data = df_combined_complete,
+    aes(
+      x = as.numeric(factor(bins)),
+      y = percentage,
+      group = interaction(group, distance),
+      color = group
+    ),
+    method = "loess",  # Smoothing method
+    se = FALSE,  
+    alpha = 0.2,  
+    size = 0.8 
+  ) +
+  theme_classic() +
+  facet_grid(row_group ~ distance, labeller = labeller(
+    row_group = c(
+      "Perceptual" = "PERC",
+      "Value: Gauss" = "V: Gauss",
+      "Value: Monotonic" = "V: Mon"
+    ),
+    distance = c("0" = "CS+", "1" = "+/-1", "2" = "+/-2", "3" = "+/-3", "4" = "+/-4")
+  )) +
+  theme(aspect.ratio = 1) +
+  scale_fill_manual(
+    name = "Model",  
+    values = c("PERC" = "orange", "VALUEGAUSS" = "#479FF8", "VALUELIN" = "#EB539F"),  # Colors for the groups
+    labels = legend_labels  # Update legend labels
+  ) +
+  scale_color_manual(  
+    values = c("PERC" = "orange", "VALUEGAUSS" = "#479FF8", "VALUELIN" = "#EB539F")
+  ) +
+  scale_alpha_identity() +  
+  ylab("%") +
+  xlab("Binned Expectancy Ratings") +
+  theme(
+    axis.title.y = element_text(margin = margin(t = 0, r = 15, b = 0, l = 0)),
+    axis.title.x = element_text(vjust = -0.4),
+    axis.line.x.bottom = element_line(size = 0.8),
+    axis.line.y.left = element_line(size = 0.8),
+    text = element_text(size = text_size),
+    legend.position = "top"
+  )
+go
+
+#ggsave(path = paste0(data_path, "/plots"), width = 8, height = 6, filename = 'dataandppchecks.png', device='png', dpi=700) 
+```
+
+

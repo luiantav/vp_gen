@@ -1,0 +1,69 @@
+---
+title: "DFunify"
+author: "LV"
+date: "2024-12-12"
+output: html_document
+---
+
+#Script joins data, fit measures and parameter estimates for generalisation data 
+
+# Get environment right
+```{r}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load("renv", "here", "knitr")
+
+here::i_am("flag_project_root.R")
+here::here()
+data_path = here::here()
+
+#renv::activate(project=here::here())
+renv::restore(project=here::here())
+#renv::snapshot()
+```
+
+
+# Get data and join 
+```{r}
+# Get task data
+dftotal<- read.csv(paste0(data_path, "/data/processed/df_alltasks.csv" ),header = TRUE)
+length(unique(dftotal$subject))
+
+# Subset generalisation trials 
+dfg <- dftotal[dftotal$task %in% "gen",]
+dfg$rr = dfg$ou
+dftotal$anx <- dftotal$sticsa
+dftotal$anx_z <- (dftotal$anx-mean(dftotal$anx))/sd(dftotal$anx)
+length(unique(dfg$subject))
+
+#get fitted parameters
+ndf<- read.csv(paste0(data_path, "/outputs/fitting/fittedparameters_valuemodel.csv" ),header = TRUE)
+ndf$rr[ndf$rr == 25] = "low"
+ndf$rr[ndf$rr == 50] = "mid"
+ndf$rr[ndf$rr == 75] = "high"
+ndf$pu[ndf$pu == "low"] = 0
+ndf$pu[ndf$pu == "high"] = 1
+ndf$subject = ndf$sub
+
+df <- merge(dfg, ndf, by=c("subject","rr", "pu"))
+df$omega_cat <- ifelse(df$omega >= 0.5, "gaussian", "linear")
+
+#get model fits
+dfbestcond<- read.csv(paste0(data_path, "/outputs/bestfittingmodel.csv" ),header = TRUE)
+dfbestcond$condition <- dfbestcond$cond
+dfbestcond$condition[grepl("R1P1", dfbestcond$condition)] <- "0" 
+dfbestcond$condition[grepl("R1P2", dfbestcond$condition)] <- "1"
+dfbestcond$condition[grepl("R2P1", dfbestcond$condition)] <- "2"
+dfbestcond$condition[grepl("R2P2", dfbestcond$condition)] <- "3"
+dfbestcond$condition[grepl("R3P1", dfbestcond$condition)] <- "4"
+dfbestcond$condition[grepl("R3P2", dfbestcond$condition)] <- "5"
+dfbestcond$subject = dfbestcond$sub
+
+fulldf <- merge(df, dfbestcond, by=c("subject","condition"))
+
+#write.csv(fulldf, paste0(data_path, "/data/processed/dfgen.csv" ),row.names = FALSE)
+```
+
+
+
+
+

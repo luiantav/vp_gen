@@ -1,0 +1,1435 @@
+---
+title: "Analyses in manuscript"
+author: "LV"
+date: "2024-10-16"
+output: html_document
+---
+
+#Script contains all anayses in order of appearance in Manuscript 
+
+# Get environment right
+```{r}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load("renv", "here", "knitr", "dplyr")
+
+here::i_am("flag_project_root.R")
+here::here()
+data_path = here::here()
+
+#renv::activate(project=here::here())
+#renv::restore(project=here::here()) #when asked to activate: NO!
+#renv::snapshot()
+
+packages <- c("ggplot2", "dplyr", "stats","lme4", "here", "renv","gtools", "see","plotrix","modelbased","emmeans", "performance", "tidyverse", "ggsignif","broom","quickpsy", "ggpubr", "performance","glmmTMB", "loo", "bayesplot","rlang","bayestestR", "rstan","brms","tidybayes","sjPlot","sjmisc","yardstick","effectsize","datawizard","esc","grid","lsr","gridExtra")
+
+# load the packages from lock 
+lapply(packages, library, character.only = TRUE)
+```
+
+# Get data for all tasks: titration, snapshot, learning, generalisation 
+```{r}
+dftotal<- read.csv(paste0(data_path, "/data/processed/df_alltasks.csv" ),header = TRUE)
+length(unique(dftotal$subject))
+
+# set general 
+adjustmethod = "holm"
+texxt = 13
+dftotal$anx <- dftotal$sticsa
+```
+
+
+
+## Demographics and questionnaires
+```{r}
+dfdemo2 <- dftotal %>%
+  filter(task == "gen") %>%
+  mutate(response = as.numeric(response)) %>%
+  group_by(subject, age, sex, anx) %>%
+  summarise(response_mean = mean(response, na.rm = TRUE), .groups = "drop")
+
+#Gender ratio, age and TA summary 
+xtabs(~sex, data = dfdemo2)      # FEMALE/MALE counts
+summary(dfdemo2$age)             # Age summary
+summary(dfdemo2$anx)             # Anxiety (STICSA) summary
+
+# T-test for gender differences in 'anx'
+t.test(anx ~ sex, data = dfdemo2) #N.S
+
+# Supplementary figure: Sticsa distribution 
+MH.labs <- c(anx = "STICSA")
+anx_long <- dfdemo2 %>%
+  pivot_longer(cols = anx, names_to = "MH", values_to = "scores_mh")
+
+ggplot(anx_long, aes(x = scores_mh)) +
+  geom_histogram(bins = 15, color = 'black', fill = 'tan') +
+  facet_grid(cols = vars(MH), labeller = labeller(MH = MH.labs)) +
+  theme_classic() +
+  theme(
+    aspect.ratio = 1,
+    strip.text.x = element_text(size = 22, face = "bold"),
+    strip.background = element_rect(color = "#EEEEEE", fill = "#EEEEEE", size = 1, linetype = "solid"),
+    axis.title.y = element_text(margin = margin(r = 1)),
+    text = element_text(size = 20)
+  ) +
+  scale_x_continuous(breaks = seq(20, 85, by = 20)) +
+  labs(x = "Score", y = "")
+
+#ggsave(path = paste0(data_path, "/plots/Supplement"), width = 5, height = 5, filename = 'sticsa_scores.png', device='png', dpi=700)
+```
+
+## Titration task - prep data 
+```{r}
+# Filter titration data for session one and two
+dft <- dftotal %>%
+  filter(task_titration == "first") %>%
+  mutate(sess = "first_titration")
+
+dft_re <- dftotal %>%
+  filter(task_titration == "re") %>%
+  mutate(sess = "re_titration", running_trial = running_trial + 40)
+
+# Combine datasets
+df_titration <- bind_rows(
+  dft %>% select(running_trial, subject, condition, pu, sess, sameness, accuracy_pc, step, color, anx, iou, sticsa_cog, sticsa_som, correct_resp, rulereverted),
+dft_re %>% select(running_trial, subject, condition, pu, sess, sameness, accuracy_pc, step, color, anx, iou, sticsa_cog, sticsa_som, correct_resp, rulereverted)
+)
+
+#subset "different" trials
+df_titration_diff<- df_titration[df_titration$sameness=="different",] 
+levels(df_titration_diff$pu) <- c("low", "high")
+
+#get final accuracy/final steps for titration 
+dft = df_titration_diff
+dft$pu = as.factor(dft$pu)
+dft$acc_final = NA
+dft$step_final = NA
+for (s in unique(dft$subject)){
+  for (c in unique(dft$condition)){
+    dftemp = subset(dft, subject == s & condition == c)
+    cond_avg = dftemp %>% slice(n())
+    dft =  dft %>% mutate(acc_final = ifelse(subject == s & condition == c, tail(dftemp$accuracy_pc, n=1), acc_final))
+    dft =  dft %>% mutate(step_final = ifelse(subject == s & condition == c, cond_avg$step, step_final))
+  }
+}
+
+#rescale to report Kappa in range 0-1
+dft$step.rescale = (dft$step_final/2)/100 
+```
+
+
+# Titration task 
+```{r}
+# Accuracy: check if accuracies differ from target levels  
+dfstat <- dft %>% 
+  group_by(subject, pu) %>% 
+  summarise_at(c("acc_final"), mean)
+dfstat
+
+t.test(dfstat$acc_final[dfstat$pu == 1], mu = 0.6, alternative = "two.sided") # p = 0.852
+t.test(dfstat$acc_final[dfstat$pu == 0], mu = 0.8, alternative = "two.sided") # p = 0.839
+
+# Get means and accuracies for each discriminability level 
+dfstat2 <- dfstat %>% 
+  group_by(pu) %>% 
+  summarise(acc_mean = mean(acc_final),acc_sd = sd(acc_final))
+dfstat2 #0.6; 0.8
+
+# Step size: check if steps differ in discriminability conditions 
+dfstat <- dft %>%
+  group_by(pu) %>%
+  summarise(
+    stp_mean = mean(step.rescale, na.rm = TRUE),
+    stp_sd = sd(step.rescale, na.rm = TRUE),
+    .groups = "drop"
+  )
+dfstat # low: 0.07; high: 0.10
+
+#Check for anxiety effects on titration:
+dfreg <- dft %>%
+  mutate(across(c(pu, color, rulereverted), as.factor)) %>%
+  group_by(subject, pu, color, rulereverted, anx, iou) %>%
+  summarise(acc_final = mean(acc_final, na.rm = TRUE), .groups = "drop")
+
+# Mean center anxiety scores 
+dfreg$anx_z <- (dfreg$anx-mean(dfreg$anx))/sd(dfreg$anx)
+
+# lmm
+m.acc.glm.anx <- lmer(acc_final ~ anx_z*pu + (1+pu | subject), data = dfreg)
+car::Anova(m.acc.glm.anx, type = "II")
+```
+
+
+# Titration task - Plots (for Supplementary)
+```{r}
+# Plot for supplementary: accuracies by discriminability level 
+dfsum <- dft %>%
+  group_by(subject, pu) %>%
+  summarise(
+    mean = mean(acc_final, na.rm = TRUE),
+    std.error = sd(acc_final, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    lower = mean - std.error,
+    upper = mean + std.error
+  )
+
+a6 <- ggplot(dfsum, aes(x = pu, y = mean, fill = pu)) +
+  geom_line(aes(group = subject), color = 'lightgray', size = 0.3) +
+  geom_hline(yintercept = c(0.6, 0.8), color = "black", linetype = "dashed", size = 0.5) +
+  geom_boxplot(outlier.shape = NA, width = 0.2) +
+  geom_point(aes(group = interaction(subject, pu)), alpha = 0.2) +
+  geom_violinhalf(position = position_nudge(x = .2, y = 0), alpha = 0.8) +
+  scale_fill_manual(values = c('#932CE7', '#E7D7F8')) +
+  scale_x_discrete(labels = c("0" = "high", "1" = "low")) +  # Custom x-axis labels
+  theme_classic() +
+  ylab("Accuracy") +
+  xlab("Discriminability") +
+  theme(
+    axis.title.y = element_text(margin = margin(r = 15)),
+    axis.title.x = element_text(vjust = -0.4),
+    axis.line.x.bottom = element_line(size = 0.8),
+    axis.line.y.left = element_line(size = 0.8),
+    text = element_text(size = 18),
+    aspect.ratio = 1.5,
+    legend.position = "none"
+  )
+a6
+#ggsave(path = paste0(data_path, "/plots/Supplement"), width = 5, height = 5, filename = 'titration_accuracy.png', device='png', dpi=700)
+
+# Supplementary plot: step size for each discriminability condition 
+dfsum <- dft %>%
+  group_by(subject, pu) %>%
+  summarise(
+    mean = mean(step.rescale, na.rm = TRUE),
+    std.error = sd(step.rescale, na.rm = TRUE) / sqrt(n()),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    lower = mean - std.error,
+    upper = mean + std.error
+  )
+
+a7 <- ggplot(dfsum, aes(x = pu, y = mean, fill = pu)) +
+  geom_line(aes(group = subject), color = 'lightgray', size = 0.3) +
+  geom_boxplot(outlier.shape = NA, width = 0.2) +
+  geom_point(aes(group = interaction(subject, pu)), alpha = 0.2) +
+  geom_violinhalf(position = position_nudge(x = .2, y = 0), alpha = 0.8) +
+  scale_fill_manual(values = c('#932CE7', '#E7D7F8')) +
+  scale_x_discrete(labels = c("0" = "high", "1" = "low")) +  # Custom x-axis labels
+  theme_classic() +
+  ylab(expression(kappa ~ "(step size)")) +
+  xlab("Discriminability") +
+  theme(
+    axis.title.y = element_text(margin = margin(r = 15)),
+    axis.title.x = element_text(vjust = -0.4),
+    axis.line.x.bottom = element_line(size = 0.8),
+    axis.line.y.left = element_line(size = 0.8),
+    text = element_text(size = 18),
+    aspect.ratio = 1.5,
+    legend.position = "none"
+  )
+a7
+#ggsave(path = paste0(data_path, "/plots/Supplement"), width = 5, height = 5, filename = 'titration_steps.png', device='png', dpi=700)
+```
+
+
+
+## Snapshot task - prep data
+```{r}
+dfs <- dftotal %>%
+  filter(task == "snap") %>%
+  mutate(
+    response = as.integer(response),
+    pu = as.factor(pu),
+    block = as.factor(block),
+    GS = pmax(gs1, gs2), # Use pmax and pmin to name pair of neigbouring stimuli 
+    GSlower = pmin(gs1, gs2),
+    distance = case_when( # Recode GS to distance
+      GS %in% c(4, 5) ~ 1,
+      GS %in% c(3, 6) ~ 2,
+      GS %in% c(2, 7) ~ 3,
+      GS %in% c(1, 8) ~ 4
+    )
+  )
+
+# Check if pairs were presented with the same frequency
+table(dfs$GS)
+
+# Recode
+dfs$response_recoded = dfs$response / 100
+```
+
+
+### Snapshot task
+```{r}
+# Discriminability conditions are perceived differently
+dfstat <- dfs %>%
+  group_by(subject, pu) %>%
+  summarise(response_mean = mean(response), .groups = "drop") %>%
+  group_by(pu) %>%
+  summarise(
+    snap.m = mean(response_mean),
+    snap.sd = sd(response_mean),
+    .groups = "drop"
+  )
+dfstat
+
+# Ratings between discriminability conditions differ significantely 
+dfstat <- dfs %>%
+  group_by(subject, pu) %>%
+  summarise(response_mean = mean(response), .groups = "drop") %>%
+  mutate(pu = recode(pu, `0` = "low", `1` = "high"))
+
+dfstat_wide <- dfstat %>%
+  spread(key = pu, value = response_mean)
+t.test(dfstat_wide$low, dfstat_wide$high)
+
+
+# Ratings get more similar with pre-post learning 
+dfstat <- dfs %>%
+  group_by(subject, block) %>%
+  summarise(response_mean = mean(response), .groups = "drop") %>%
+  group_by(block) %>%
+  summarise(
+    snap.m = mean(response_mean),
+    snap.sd = sd(response_mean),
+    .groups = "drop"
+  )
+dfstat
+
+
+# glm
+dfss <- dfs %>%
+  filter(response_recoded > 0 & response_recoded < 1) %>%
+  mutate(
+    distance = as.integer(distance)
+  )
+
+m.snap.glm <- glmmTMB::glmmTMB(data = dfss, formula = response_recoded ~ block * distance + (1 + block+distance | subject) + (1 | pu), family = beta_family(link = "logit"))
+car::Anova(m.snap.glm, type = "II")
+summary(m.snap.glm)
+
+# Pre-post effect
+emm.snap.block <- emmeans(m.snap.glm, ~ block, adjust=adjustmethod)
+emm.contr <-summary(pairs(emm.snap.block, adjust=adjustmethod))
+emm.contr
+z_to_d(emm.contr$`z.ratio`[1], nobs(m.snap.glm), paired = FALSE, ci = 0.95)
+confint(m.snap.glm, 'distance', level = 0.95) 
+
+#ETA 2 - effect size workaround
+m.snap.lmer <- lmer(data=dfss, response_recoded ~  block*distance+(1+block|subject) + (1|pu))
+#car::Anova(m.snap.lmer, type = "II", test= "F") #tt
+#effectsize::eta_squared(m.snap.lmer, alternative = "two.sided")
+
+#No effect of trait anxiety 
+dfss$anx_z <- (dfss$anx-mean(dfss$anx))/sd(dfss$anx)
+dfss$iou_z <- (dfss$iou-mean(dfss$iou))/sd(dfss$iou)
+m.snap.glm.anx <- glmmTMB::glmmTMB(data=dfss, response_recoded ~ pu*anx_z+ (1+pu|subject), family = beta_family(link="logit")) 
+car::Anova(m.snap.glm.anx, type = "II")
+summary(m.snap.glm.anx)
+```
+
+#Snapshot - plots (for Supplementary)
+```{r}
+#Plot for suppelementary: differences in discriminability conditions
+dfsums <- dfs %>% 
+  group_by(distance, subject, pu) %>% 
+  summarise_at("response",funs(mean),na.rm = TRUE)
+
+dfsum <- dfsums %>% 
+  group_by(distance, pu) %>% 
+  summarise_at("response",funs(mean,std.error),na.rm = TRUE)
+dfsum$lower = dfsum$mean - dfsum$std.error
+dfsum$upper = dfsum$mean + dfsum$std.error
+
+ggplot(dfsum, aes(x = distance, y = mean, group = pu, fill = pu)) + 
+  geom_line(color = 'black') +
+  geom_ribbon(aes(ymin = lower, ymax = upper), na.rm = TRUE, show.legend = TRUE, color = NA, alpha = 0.5) +
+  xlab('Distance from CS+') +
+  ylab('Similarity rating (0 = same, 100 = different)') +
+  scale_fill_manual(name = "Discriminability", values = c('purple', '#DCBAF7'), labels = c("high", "low")) + 
+  scale_color_manual(name = "Discriminability", values = c('purple', '#DCBAF7'), labels = c("high", "low")) + 
+  theme_classic() +
+  theme(
+    axis.title.y = element_text(margin = margin(t = 0, r = 15, b = 0, l = 0)),
+    axis.title.x = element_text(vjust = -0.4),
+    axis.line.x.bottom = element_line(size = 0.8),
+    axis.line.y.left = element_line(size = 0.8),
+    text = element_text(size = texxt),
+    aspect.ratio = 1,
+    legend.position = c(0.3, 0.9)# Show legend on the right side
+  )
+#ggsave(path = paste0(data_path, "/plots/Supplement"), width = 5, height = 5, filename = 'similarity_pu.png', device='png', dpi=700)
+
+# Plot for supplementary: change from pre to post
+dfsums <- dfs %>% 
+  group_by(distance, subject, block) %>% 
+  summarise_at("response",funs(mean),na.rm = TRUE)
+
+dfsum <- dfsums %>% 
+  group_by(distance, block) %>% 
+  summarise_at("response",funs(mean,std.error),na.rm = TRUE)
+dfsum$lower = dfsum$mean - dfsum$std.error
+dfsum$upper = dfsum$mean + dfsum$std.error
+
+ggplot(dfsum, aes(x = distance, y = mean, group = block, fill = block)) + geom_line(show.legend = FALSE)+geom_ribbon(aes(ymin=lower, ymax=upper),  na.rm = TRUE,show.legend = TRUE, color = NA,alpha=0.5)+xlab('Distance from CS+')+ylab('Similarity rating (0 = same, 100 = different')+scale_fill_manual(values = c('purple','#DCBAF7'))+scale_color_manual(values = c('purple','#DCBAF7'))+ theme_classic()+theme(axis.title.y = element_text(margin = margin(t = 0, r = 15, b = 0, l = 0)))+ theme(axis.title.x = element_text(vjust=-0.4))+theme(axis.line.x.bottom=element_line(size=0.8),axis.line.y.left=element_line(size=0.8))+theme(text = element_text(size = texxt))+theme(aspect.ratio = 1)+theme(axis.title.y = element_text(margin = margin(r = 1)))+theme(legend.position="none")+ scale_fill_manual( name = "Rating", values = c("1" = "purple", "2" = "#DCBAF7"), labels = c("pre", "post"))+theme(legend.position = c(0.3, 0.9),legend.title = element_text(size=texxt))+labs(fill = "")
+
+#ggsave(path = paste0(data_path, "/plots/Supplement"), width = 5, height = 5, filename = 'similarity_block.png', device='png', dpi=700)
+```
+
+
+
+## Learning task 
+```{r}
+# Get learning data 
+dfl <- dftotal[dftotal$task %in% "learn",]
+
+# Check if ratings differ from target levels: ppt overestimate outcome probabilities
+dfl$response = as.integer(dfl$response)
+dfl$response_recoded = dfl$response/100
+dfstat <- dfl %>% 
+  group_by(subject, ou) %>% 
+  summarise_at(c("response_recoded"), mean)
+
+t.test(dfstat$response_recoded[grep("low", dfstat$ou)], mu = 0.25, alternative = "two.sided")
+lsr::cohensD(dfstat$response_recoded[grep("low", dfstat$ou)] ,mu = 0.25) #0.34
+
+t.test(dfstat$response_recoded[grep("mid", dfstat$ou)], mu = 0.5, alternative = "two.sided")
+lsr::cohensD(dfstat$response_recoded[grep("mid", dfstat$ou)] ,mu = 0.5) #0.3
+
+t.test(dfstat$response_recoded[grep("high", dfstat$ou)], mu = 0.75, alternative = "two.sided")
+lsr::cohensD(dfstat$response_recoded[grep("high", dfstat$ou)] ,mu = 0.75) #0.15
+
+
+# Get mean rating for each reinforcement level 
+dfstat <- dfstat %>%
+  group_by(ou) %>%
+  summarise(learn.m = mean(response_recoded),learn.sd = sd(response_recoded))
+dfstat
+
+# lm: ratings for different reinforcement levels differ sig.
+dfll = dfl[dfl$response_recoded > 0 & dfl$response_recoded <1, ]
+dfll$ou = as.factor(dfll$ou)
+dfll$ou <- relevel(dfll$ou, ref = "low")
+
+m.learn.glm <- glmmTMB::glmmTMB(data=dfll, response_recoded ~ou +(1+ou|subject), family = beta_family(link="logit"))
+car::Anova(m.learn.glm, type = "II") 
+
+# rr effect 
+emm.learn <- emmeans(m.learn.glm, ~ ou, adjust=adjustmethod)
+emm.contr <-summary(pairs(emm.learn, adjust=adjustmethod))
+emm.contr
+z_to_d(emm.contr$`z.ratio`[1], nobs(m.learn.glm), paired = FALSE, ci = 0.95)
+z_to_d(emm.contr$`z.ratio`[2], nobs(m.learn.glm), paired = FALSE, ci = 0.95)
+z_to_d(emm.contr$`z.ratio`[3], nobs(m.learn.glm), paired = FALSE, ci = 0.95)
+#ETA 2 *workaraund 
+m.learn.lmer <- lmer(data=dfll, response_recoded ~ou +(1+ou|subject))
+car::Anova(m.learn.lmer, type = "II", test= "F")
+effectsize::eta_squared(m.learn.lmer, alternative = "two.sided")
+
+# No effect of trait anxiety on learning
+dfll$anx_z <- (dfll$anx-mean(dfll$anx))/sd(dfll$anx)
+m.learn.glm.anx <- glmmTMB::glmmTMB(data=dfll, response_recoded ~ou*anx_z +(1+ou|subject), family = beta_family(link="logit"))
+car::Anova(m.learn.glm.anx, type = "II") 
+```
+
+## Learning task - plots 
+```{r}
+#Fig: 2a
+texxt = 18
+dfsum <- dfl %>% 
+  group_by(subject, ou) %>% 
+  summarise_at("response",funs(mean,std.error),na.rm = TRUE)
+dfsum$lower = dfsum$mean - dfsum$std.error
+dfsum$upper = dfsum$mean + dfsum$std.error
+
+dfsum$ou <- factor(dfsum$ou, levels=c("low", "mid", "high"))
+my_comparisons <- list( c("high", "mid"), c("mid", "low"))
+
+ggplot(dfsum, aes(x=ou, y=mean, fill = ou))+geom_line(aes(group= subject),color = 'lightgray', size = 0.3)+geom_hline(yintercept = c(25,50,75), color = "black", linetype = "dashed", size = 0.5)  +geom_boxplot(outlier.shape = NA,width=0.2)+geom_point(aes(group= interaction(subject, ou)), alpha = 0.2)+ theme_classic()+ylab(expression("Ratings after learning"))+xlab('Reinforcement Rate')+geom_violinhalf(position = position_nudge(x = .2, y = 0), alpha = 0.8)+scale_fill_manual(values = c('#479FF8','#89C2FB','#D0E7FD'))+ theme_classic()+theme(aspect.ratio = 1)+theme(axis.title.y = element_text(margin = margin(t = 0, r = 15, b = 0, l = 0)))+ theme(axis.title.x = element_text(vjust=-0.4))+theme(axis.line.x.bottom=element_line(size=0.8),axis.line.y.left=element_line(size=0.8))+theme(text = element_text(size = 18))+theme(legend.position="none")+ scale_x_discrete(labels = c("25%","50%","75%"))
+
+#ggsave(path = paste0(data_path, "/plots"), width = 5, height = 5, filename = 'learning.png', device='png', dpi=700)
+#ggsave(path = paste0(data_path, "/plots"), width = 5, height = 5, filename = 'learning.pdf', device='pdf', dpi=700)
+```
+
+
+# Generalisation task - prep data
+```{r}
+# Get data for generalisation task (including fit parameters and model fits)
+dfg <- read.csv(paste0(data_path, "/data/processed/dfgen.csv"),header = TRUE) #full df with fitted parameters & co 
+length(unique(dfg$subject))
+dfg$response = as.integer(dfg$response)
+```
+
+
+#Check for non-0 responses to GS stimuli as first evidence for generalisation 
+```{r}
+gen_stim = dfg[dfg$distance != 0,]
+nonz = sum(gen_stim$response != 0)
+nonz/nrow(gen_stim) #82% not 0
+```
+
+
+#Fig. 2b: raw gradients (no colors and no reversal)
+```{r}
+pdf0 <- dfg %>%
+  group_by(subject,gs) %>%
+  summarise_at("response", funs(mean,std.error),na.rm = TRUE)
+pdf0$lower = pdf0$mean - pdf0$std.error
+pdf0$upper = pdf0$mean + pdf0$std.error
+
+ggplot(pdf0, aes(x=as.factor(gs), y=mean,  group=subject))+geom_line(aes(group=subject),  na.rm = TRUE,alpha=0.15,show.legend = FALSE, size = 0.8)+labs(x = "Stimuli", y = "Expectancy ratings")+ylim(0, 100)+ theme_classic()+ scale_x_discrete(labels = c("GS-4","","","","CS+","","","","GS4"))+theme_classic()+theme(aspect.ratio = 1)+theme(axis.title.y = element_text(margin = margin(t = 0, r = 15, b = 0, l = 0)))+ theme(axis.title.x = element_text(vjust=-0.4))+theme(axis.line.x.bottom=element_line(size=0.8),axis.line.y.left=element_line(size=0.8))+theme(text = element_text(size = 18))+theme(legend.position = c(.8, .88),legend.title = element_text(size=texxt))+ labs(col = "") + labs(fill = "")
+
+#ggsave(path = paste0(data_path, "/plots"), width = 5, height = 5, filename = 'gradients_gray.png', device='png', dpi=700)
+```
+# Fig. 2c: gradients colored by majority rule
+```{r}
+dfg$response = as.numeric(dfg$response)
+dfg2 <- dfg[dfg$overallrule != "flat",]
+
+pdf0 <- dfg2 %>%
+  group_by(subject,gsreverted,overallrule) %>%
+  summarise_at("response", funs(mean,std.error),na.rm = TRUE)
+pdf0$lower = pdf0$mean - pdf0$std.error
+pdf0$upper = pdf0$mean + pdf0$std.error
+
+pdf1 <- dfg2 %>%
+  group_by(gsreverted,overallrule, subject) %>%
+  summarise_at("response", funs(mean),na.rm = TRUE)
+
+pdf1 <- pdf1 %>%
+  group_by(gsreverted,overallrule) %>%
+  summarise_at("response", funs(mean,std.error),na.rm = TRUE)
+pdf1$lower = pdf1$mean - pdf1$std.error
+pdf1$upper = pdf1$mean + pdf1$std.error
+
+ggplot(pdf0, aes(x=as.factor(gsreverted), y=mean, group=subject)) +
+  geom_line(aes(col = overallrule, group=subject), na.rm = TRUE, alpha=0.15, show.legend = FALSE, size = 0.8) +
+  scale_fill_manual(values = c("black", "#EB539F"), labels = c("Gaussian", "Monotonic")) +
+  scale_color_manual(values = c("black", "#EB539F"), labels = c("Gaussian", "Monotonic")) + # Change color legend labels
+  labs(x = "Stimuli", y = "Expectancy ratings") +
+  ylim(0, 100) + 
+  theme_classic() + 
+  theme(aspect.ratio = 1) +
+  scale_x_discrete(labels = c("GS-4","","","","CS+","","","","GS4")) +
+  geom_line(data=pdf1, aes(x=as.factor(gsreverted), y=mean, group = overallrule, color = overallrule), size = 1.2, na.rm = TRUE, alpha=1, show.legend = TRUE) +
+  theme(axis.title.y = element_text(margin = margin(t = 0, r = 15, b = 0, l = 0))) + 
+  theme(axis.title.x = element_text(vjust=-0.4)) +
+  theme(axis.line.x.bottom = element_line(size = 0.8), axis.line.y.left = element_line(size = 0.8)) +
+  theme(text = element_text(size = 18)) + 
+  theme(axis.title.y = element_text(margin = margin(r = 1))) +
+  theme(legend.position = c(.8, .88), legend.title = element_text(size = texxt)) + 
+  labs(col = "", fill = "") # Remove legend titles
+
+#ggsave(path = paste0(data_path, "/plots"), width = 5, height = 5, filename = 'gradients.png', device='png', dpi=700)
+```
+
+
+
+# Check distribution of mechanisms and pattern 
+```{r}
+#reduce to one entry x ppt and condition
+paramdf <- dfg %>% 
+  group_by(subject, rr, pu, anx_z, omega, lambda, offset, condition, anx, bestfit, omega_cat) %>% 
+  summarise_at("response",funs(mean,std.error),na.rm = TRUE)
+paramdf
+
+
+#check distribution of mechanism
+paramdf$sub = paramdf$subject
+count_table <- paramdf %>%
+  group_by(bestfit) %>%
+  #group_by(bestfit, omega_cat) %>%
+  summarise(count = n(), .groups = 'drop')
+count_table
+#110/840
+
+
+#check distribution of pattern (overall, not just for value) 
+count_table <- paramdf %>%
+  group_by(omega_cat) %>%
+  summarise(count = n(), .groups = 'drop')
+count_table
+#377/840
+
+```
+
+
+#Check pattern consistency
+```{r}
+# Assess consistency of pattern use
+pdf0 <- paramdf %>%
+  group_by(sub) %>%
+  mutate(consistency = if_else(n_distinct(omega_cat) == 1, 1, 0)) %>%
+  ungroup() # 1 = consistently use one pattern
+
+# Reduce to 1 observation x ppt
+count_table2 <- pdf0 %>%
+  group_by(subject, consistency) %>%
+  summarise(anx = mean(anx, na.rm = TRUE), .groups = "drop") %>%
+  count(consistency, name = "count")
+count_table2 #91/140 = 65% consistently use one pattern across conditions 
+
+#check if pattern consistency is associated with anxiety? --> NO 
+pdf1 <- pdf0 %>% 
+  group_by(subject, consistency) %>% 
+  summarise_at(c("anx"), mean)
+t.test(anx ~ as.factor(consistency), data = pdf1)
+cohensD(anx ~ as.factor(consistency), data = pdf1) 
+```
+
+#show that Gauss has higher ratings at CS+ & that monotonic gradients have overall higher ratings 
+```{r}
+# Gauss > ratings at CS+
+dfplot <- merge(dfg, paramdf, by=c("subject", "rr", "pu"))
+pdf0 <- dfg %>%
+  group_by(subject, distance, ou, pu, omega_cat) %>%
+  summarise_at("response", funs(mean, std.error), na.rm = TRUE)
+t.test(mean ~ omega_cat, data = pdf0[pdf0$distance == 0,])
+cohensD(mean ~ omega_cat, data = pdf0[pdf0$distance == 0,]) #0.2892677
+
+# Monotonic overall > ratings
+pdf0 <- dfg %>%
+  group_by(subject, ou, pu, omega_cat) %>%
+  summarise_at("response", funs(mean, std.error), na.rm = TRUE)
+t.test(mean ~ omega_cat, data = pdf0)
+lsr::cohensD(mean ~ omega_cat, data = pdf0) #1.20
+```
+
+# Assess model fits & Fig. 4a
+```{r}
+# % best fit by Perceptual or value model 
+mechanismtab = table(paramdf$bestfit)
+mechanismtab #13.1%
+
+#Split by mechanism (and pattern)
+rawtab = table(paramdf$omega_cat, paramdf$bestfit)
+percentage_table <- prop.table(rawtab, margin = 2) * 100
+percentage_table
+
+#Plot: Split by Pattern (and mechanism)
+rawtab = table(paramdf$omega_cat, paramdf$bestfit)
+percentage_table <- prop.table(rawtab, margin = 1) * 100
+percentage_table
+tab_percent <- as.data.frame(as.table(percentage_table))
+
+#Fig 4a: model fits x pattern in % 
+ggplot(tab_percent, aes(x=Var2, y = Freq, fill = Var2)) + geom_bar(stat = "identity", width = 0.5)+theme_classic()+ scale_fill_brewer(palette="Purples")+theme(aspect.ratio = 2)+theme(axis.title.y = element_text(margin = margin(r = 1)))+theme(text = element_text(size = 20))+xlab("Best fitting model")+ylab("")+ scale_x_discrete(labels = c("P","V"))+theme(legend.position = "none")+scale_y_continuous(labels = scales::percent_format(scale = 1))+facet_grid(.~Var1)+ scale_fill_manual( values = c("PERC" = "orange", "VALUE" = "black"), labels = c("P", "V"))+theme(axis.title.y = element_text(margin = margin(t = 0, r = 15, b = 0, l = 0)))+ theme(axis.title.x = element_text(vjust=-0.4))+theme(axis.line.x.bottom=element_line(size=0.8),axis.line.y.left=element_line(size=0.8))
+
+#ggsave(path = paste0(data_path, "/plots"), width = 5, height = 5, filename = 'model_fits.png', device='png', dpi=700)
+```
+
+#Check mechanism consistency & Fig. 5c
+```{r}
+# Assess consistency
+pdf0 <- paramdf %>%
+  group_by(sub) %>%
+  mutate(consistency = if_else(n_distinct(bestfit) == 1, 1, 0)) %>%
+  ungroup() # 1 = consistently use one mechanism
+
+# Reduce to 1 observation x ppt
+count_table2 <- pdf0 %>%
+  group_by(subject, consistency) %>%
+  summarise(anx = mean(anx, na.rm = TRUE), .groups = "drop") %>%
+  count(consistency, name = "count")
+count_table2 #108/140 = 77% consistently use one mechanism across conditions 
+
+
+#check if mechanism consistency is associated with anxiety? --> YES 
+pdf1 <- pdf0 %>% 
+  group_by(subject, consistency) %>% 
+  summarise_at(c("anx"), mean)
+t.test(anx ~ as.factor(consistency), data = pdf1)
+cohensD(anx ~ as.factor(consistency), data = pdf1) #43.68
+
+#Fig. 5c: consistency and anxiety 
+ggplot(pdf1, aes(x = as.factor(consistency), y = anx, fill = as.factor(consistency))) +
+  geom_boxplot(outlier.shape = NA, width = 0.2) +
+  geom_point(aes(group = subject), alpha = 0.2) +
+  geom_violinhalf(position = position_nudge(x = .2, y = 0), alpha = 0.8) +
+  scale_fill_manual(values = c('#2E2E2E', 'lightgray')) +
+  scale_x_discrete(labels = c("0" = "no", "1" = "yes")) +  # Custom x-axis labels
+  theme_classic() +
+  ylab("Trait anxiety") +
+  xlab("Consistency") +
+  theme(
+    axis.title.y = element_text(margin = margin(r = 15)),
+    axis.title.x = element_text(vjust = -0.4),
+    axis.line.x.bottom = element_line(size = 0.8),
+    axis.line.y.left = element_line(size = 0.8),
+    text = element_text(size = 18),
+    aspect.ratio = 1.5,
+    legend.position = "none"
+  )
+
+#ggsave(path = paste0(data_path, "/plots"), width = 5, height = 5, filename = 'consistency.png', device='png', dpi=700)
+```
+
+
+#3c) Response distribution checks 
+```{r}
+# Normalise distributions
+dfgC <- dfg %>%
+  group_by(subject, ou, pu_cat) %>%
+  mutate(response_normalized = (response - min(response)) / (max(response) - min(response)))
+
+# Name groups
+dfgC$group = "PERC"
+dfgC$group[dfgC$omega_cat == "linear" & dfgC$bestfit == "VALUE"] = "VALUELIN"
+dfgC$group[dfgC$omega_cat == "gaussian" & dfgC$bestfit == "VALUE"] = "VALUEGAUSS"
+
+# Compare Perceptual and value gaussian 
+subperc = dfgC[dfgC$group == "PERC",]
+subvalue = dfgC[dfgC$group == "VALUEGAUSS",]
+ks.test(subperc$response_normalized, subvalue$response_normalized)
+
+# Compare within value 
+subperc = dfgC[dfgC$group == "VALUELIN",]
+subvalue = dfgC[dfgC$group == "VALUEGAUSS",]
+ks.test(subperc$response_normalized, subvalue$response_normalized)
+```
+
+#Fig. 4b: Scatterplots with mean
+```{r}
+dfgC = dfg
+text_size = 12
+alp = 0.06
+TRR <- dfgC %>%
+  group_by(subject, ou, pu_cat) %>%
+  mutate(response_normalized = (response_recoded - min(response_recoded)) / (max(response_recoded) - min(response_recoded)))
+
+table(TRR$bestfit)
+
+dfgC <- dfgC[dfgC$rulereverted != "flat",] %>%
+  group_by(subject, ou,pu_cat) %>%
+  mutate(response_normalized = (response_recoded - min(response_recoded)) / (max(response_recoded) - min(response_recoded)))
+
+
+mean_data <- dfgC[dfgC$bestfit == "PERC" | (dfgC$bestfit=="VALUE" & dfgC$omega_cat == "gaussian"),] %>%
+  group_by(gsreverted, bestfit) %>%
+  summarize(mean_height = mean(response_normalized), .groups = 'drop')
+
+
+p <- ggplot(data = TRR[TRR$bestfit == "PERC",], aes(y=response_normalized, x = as.factor(gsreverted)))+geom_jitter(alpha = alp)+theme_classic()+theme(aspect.ratio = 1)+
+  labs(title = "Perceptual", x = "Stimulus", y = "Standardised ratings")+geom_point(data = mean_data[mean_data$bestfit == "PERC",], aes(x = as.factor(gsreverted), y = mean_height), size = 2, color = "orange") +
+  geom_line(data = mean_data[mean_data$bestfit == "PERC",], aes(x = as.factor(gsreverted), y = mean_height, group = bestfit), linetype = "solid", color = "orange", size = 1.5)+ theme_classic()+theme(axis.title.y = element_text(margin = margin(t = 0, r = 15, b = 0, l = 0)))+ theme(axis.title.x = element_text(vjust=-0.4))+theme(axis.line.x.bottom=element_line(size=0.8),axis.line.y.left=element_line(size=0.8))+theme(text = element_text(size = text_size))+theme(aspect.ratio = 1)+theme(axis.title.y = element_text(margin = margin(r = 1)))+theme(legend.position="none")+theme(legend.position="none")+theme(plot.title = element_text(size = text_size)) + scale_x_discrete(labels= c("","","","","CS+","","","",""))+ 
+    theme(plot.title = element_text(size = text_size, face = "bold"))
+
+#p <- ggExtra::ggMarginal(p, type = "histogram",fill = "orange", bins = 9)
+p
+pp <- ggplot(data = TRR[TRR$bestfit == "VALUE"& TRR$omega_cat == "gaussian",], aes(y=response_normalized, x = as.factor(gsreverted)))+geom_jitter(alpha = alp)+theme_classic()+theme(aspect.ratio = 1)+
+  labs(title = "Value:Gauss", x = " ", y = " ")+geom_point(data = mean_data[mean_data$bestfit == "VALUE",], aes(x = as.factor(gsreverted), y = mean_height), size = 2, color = "#479FF8") +
+  geom_line(data = mean_data[mean_data$bestfit == "VALUE",], aes(x = as.factor(gsreverted), y = mean_height, group = bestfit), linetype = "solid", color = "#479FF8", size = 1.5)+theme_classic()+theme(axis.title.y = element_text(margin = margin(t = 0, r = 15, b = 0, l = 0)))+ theme(axis.title.x = element_text(vjust=-0.4))+theme(axis.line.x.bottom=element_line(size=0.8),axis.line.y.left=element_line(size=0.8))+theme(text = element_text(size = text_size))+theme(aspect.ratio = 1)+theme(axis.title.y = element_text(margin = margin(r = 1)))+theme(legend.position="none")+theme(legend.position="none")+theme(plot.title = element_text(size = text_size))+ scale_x_discrete(labels= c("","","","","CS+","","","",""))+ 
+    theme(plot.title = element_text(size = text_size, face = "bold"))
+pp
+#pp <- ggExtra::ggMarginal(pp, type = "histogram",fill = "#479FF8", bins = 9)
+
+
+mean_data <- dfgC[dfgC$bestfit == "PERC" | (dfgC$bestfit=="VALUE" & dfgC$omega_cat == "linear"),] %>%
+  group_by(gsreverted, bestfit) %>%
+  summarize(mean_height = mean(response_normalized), .groups = 'drop')
+
+
+ppp <- ggplot(data = TRR[TRR$bestfit == "VALUE"& TRR$omega_cat == "linear",], aes(y=response_normalized, x = as.factor(gsreverted)))+geom_jitter(alpha = alp)+theme_classic()+theme(aspect.ratio = 1)+
+  labs(title = "Value:Linear", x = " ", y = " ")+geom_point(data = mean_data[mean_data$bestfit == "VALUE",], aes(x = as.factor(gsreverted), y = mean_height), size = 2, color = "#EB539F") +
+  geom_line(data = mean_data[mean_data$bestfit == "VALUE",], aes(x = as.factor(gsreverted), y = mean_height, group = bestfit), linetype = "solid", color = "#EB539F", size = 1.5)+ theme_classic()+theme(axis.title.y = element_text(margin = margin(t = 0, r = 15, b = 0, l = 0)))+ theme(axis.title.x = element_text(vjust=-0.4))+theme(axis.line.x.bottom=element_line(size=0.8),axis.line.y.left=element_line(size=0.8))+theme(text = element_text(size = text_size))+theme(aspect.ratio = 1)+theme(axis.title.y = element_text(margin = margin(r = 1)))+theme(legend.position="none")+theme(plot.title = element_text(size = text_size)) + scale_x_discrete(labels= c("","","","","CS+","","","",""))+ 
+    theme(plot.title = element_text(size = text_size, face = "bold"))
+
+ppp
+
+g <- arrangeGrob(p, pp, ppp, nrow =1) #generates g
+ ggsave(file=paste0(data_path, "/plots/scatterfull.png"), g) #saves g
+g
+```
+
+
+#Fig 4c: Response histograms: normalise responses and plot x distance
+```{r}
+text_size =12
+lai = 5 #number of bins
+#standardise within ppt and condition
+dfgC <- dfgC %>%
+  group_by(subject, ou, pu_cat) %>%
+  mutate(response_normalized = (response - min(response)) / (max(response) - min(response)))
+
+dfgC$group = "PERC"
+dfgC$group[dfgC$omega_cat == "linear" & dfgC$bestfit == "VALUE"] = "VALUELIN"
+dfgC$group[dfgC$omega_cat == "gaussian" & dfgC$bestfit == "VALUE"] = "VALUEGAUSS"
+
+
+#bin and count
+NAH <- dfgC[dfgC$rulereverted != "flat",] %>%
+  group_by(subject) %>%
+  mutate(bins = cut(response_normalized, breaks = lai, labels = FALSE)) %>%
+  group_by(subject, bins, group, distance) %>%
+  summarise(Count = n()) %>%
+  ungroup()
+
+# Summarize data and calculate statistics
+    pdf0 <- NAH %>%
+      group_by(bins, group, distance) %>%
+      summarise(
+        mean = mean(Count, na.rm = TRUE),
+        std.error = sd(Count, na.rm = TRUE) / sqrt(n())
+      )
+
+    # Process data for percentages and layering
+    result <- pdf0 %>%
+      group_by(group, distance) %>%
+      mutate(
+        total_gui = sum(mean),
+        percentage = mean / total_gui * 100,
+        row_group = ifelse(group == "PERC", "Row 1: PERC", "Row 2: VALUE Models"),
+        alpha_value = ifelse(group == "PERC", 1, 0.5) # Set alpha for groups
+      ) %>%
+      ungroup() %>%
+      mutate(
+        group = factor(group, levels = c("PERC", "VALUEGAUSS", "VALUELIN")) # Ensure blue is above pink
+      )
+
+    # Labels for facets
+    row_group.labs <- c("Perceptual", "Value")
+    names(row_group.labs) <- c("Row 1: PERC", "Row 2: VALUE Models")
+
+    text_size <- 20
+
+    # Updated legend labels and title
+    legend_labels <- c("Perceptual", "Value: Gauss", "Value: Monotonic")
+
+    # Updated plot
+    go <- ggplot(data = result, aes(x = factor(bins), y = percentage, fill = group)) +
+      geom_bar(
+        stat = "identity",
+        position = "identity",
+        aes(alpha = alpha_value)  # Apply alpha based on group
+      ) +
+      theme_classic() +
+      facet_grid(row_group ~ distance, labeller = labeller(row_group = row_group.labs)) +
+      theme(aspect.ratio = 1) +
+      scale_fill_manual(
+        name = "Model",  # Set the legend title here
+        values = c("orange", "#479FF8", "#EB539F"),  # Colors for the groups
+        labels = legend_labels  # Update legend labels
+      ) +
+      scale_alpha_identity() +  # Use alpha values from the data
+      ylab("%") +
+      xlab("Binned Expectancy Ratings") +
+      theme(
+        axis.title.y = element_text(margin = margin(t = 0, r = 15, b = 0, l = 0)),
+        axis.title.x = element_text(vjust = -0.4),
+        axis.line.x.bottom = element_line(size = 0.8),
+        axis.line.y.left = element_line(size = 0.8),
+        text = element_text(size = text_size),
+        legend.position = "top"
+      )
+
+    go
+
+#ggsave(path = paste0(data_path, "/plots"), width = 5, height = 5, filename = 'dist_relevant.png', device='png', dpi=700)
+```
+
+
+Fig. 4d: scatterplots at distance +/-1
+```{r}
+text_size = 16
+lai = 6
+TRR <- dfgC %>%
+  group_by(subject, ou, pu_cat) %>%
+  mutate(response_normalized = (response - min(response)) / (max(response) - min(response)))
+
+hu0 <- ggplot(data = TRR[(TRR$bestfit == "PERC" | (TRR$bestfit == "VALUE"& TRR$rulereverted == "gaussian")) & TRR$distance == 1,], aes(y=response_normalized, x = as.factor(bestfit), colour = bestfit, fill = bestfit))+geom_jitter(alpha = 0.4, width=0.2, color = "black")+theme_classic()+theme(aspect.ratio = 1)+
+  labs(title = "Distance +/- 1 from CS+", x = "Best fit", y = "Ratings")+scale_fill_manual(values = c("orange","#479FF8"))+scale_color_manual(values = c("orange","#479FF8"))+theme(axis.title.y = element_text(margin = margin(t = 0, r = 15, b = 0, l = 0)))+ theme(axis.title.x = element_text(vjust=-0.4))+theme(axis.line.x.bottom=element_line(size=0.8),axis.line.y.left=element_line(size=0.8))+theme(text = element_text(size =text_size))
+hu0
+
+hu <- ggplot(data = TRR[(TRR$bestfit == "PERC" | (TRR$bestfit == "VALUE"& TRR$rulereverted == "gaussian")) & TRR$distance == 1,], aes(y=response_normalized, x = as.factor(bestfit), colour = bestfit, fill = bestfit))+geom_jitter(alpha = 0.4, width=0.2, color = "black")+geom_violin( alpha = 0.6, width=0.5, position=position_dodge(1))+theme_classic()+theme(aspect.ratio = 1)+
+  labs(title = " ", x = "Best fit", y = "Ratings")+scale_fill_manual(values = c("orange","#479FF8"))+scale_color_manual(values = c("orange","#479FF8"))+scale_x_discrete(labels=c('P', "V:Gauss"))+ theme_classic()+theme(axis.title.y = element_text(margin = margin(t = 0, r = 15, b = 0, l = 0)))+ theme(axis.title.x = element_text(vjust=-0.4))+theme(axis.line.x.bottom=element_line(size=0.8),axis.line.y.left=element_line(size=0.8))+theme(text = element_text(size = text_size))+theme(aspect.ratio = 1)+theme(axis.title.y = element_text(margin = margin(r = 1)))+theme(legend.position="none")
+
+
+p_density <- ggplot(data =TRR[TRR$bestfit == "PERC" & TRR$distance == 1,],aes(x=response_normalized)) +
+  geom_histogram(bins = lai, fill = "orange")+
+  theme_void() + coord_flip()
+p_density
+
+
+p_density2 <- ggplot(data =TRR[(TRR$bestfit == "VALUE"& TRR$rulereverted == "gaussian") & TRR$distance == 1,],aes(x=response_normalized)) +
+  geom_histogram(bins = lai, fill ="#479FF8")+
+  theme_void() + coord_flip()
+p_density2
+
+
+
+ya = hu + annotation_custom(ggplotGrob(p_density),
+                              xmin = 1.3, ymin = -0.05,
+                              xmax = 1.75)
+
+
+xi = ya + annotation_custom(ggplotGrob(p_density2),
+                              xmin = 2.3, ymin = -0.05,
+                              xmax = 2.75)
+
+xi
+
+#ggsave(path = paste0(data_path, "/plots"), width = 5, height = 5, filename = 'distplusminus1.png', device='png', dpi=700)
+```
+
+
+
+# Model parameters: lambda 
+```{r}
+paramdf$rr = as.factor(paramdf$rr)
+paramdf$omega_cat = as.factor(paramdf$omega_cat)
+paramdf$pu = as.factor(paramdf$pu)
+
+m.lambda <- lmer(data=paramdf, lambda ~ omega_cat*rr + omega_cat*pu +(1+rr+pu|subject))
+car::Anova(m.lambda) #omega and rr impact lambda 
+
+# eta2
+effectsize::eta_squared(m.lambda, alternative = "two.sided")
+
+# Pattern effect
+emm.learn <- emmeans(m.lambda, ~ omega_cat, adjust="holm", type = "response")
+emm.learn
+emm.contr <-summary(pairs(emm.learn, adjust=adjustmethod))
+emm.contr
+t_to_eta2(emm.contr$t.ratio[1], emm.contr$df[1], ci = 0.95, alternative = "two.sided")
+
+# Discriminability effect
+emm.learn <- emmeans(m.lambda, ~ pu, adjust="holm", type = "response")
+emm.learn
+emm.contr <-summary(pairs(emm.learn, adjust=adjustmethod))
+emm.contr
+t_to_eta2(emm.contr$t.ratio[1], emm.contr$df[1], ci = 0.95, alternative = "two.sided")
+
+# Pattern and reinforcement rate effect 
+emm.learn <- emmeans(m.lambda, ~ rr|omega_cat, adjust="holm", type = "response")
+emm.learn
+emm.contr <-summary(pairs(emm.learn, adjust=adjustmethod))
+emm.contr
+t_to_eta2(emm.contr$t.ratio[5], emm.contr$df[5], ci = 0.95, alternative = "two.sided")
+t_to_eta2(emm.contr$t.ratio[6], emm.contr$df[6], ci = 0.95, alternative = "two.sided")
+#plot(emm.learn)
+```
+
+#Supplementary figure: plot single gradients 
+```{r}
+#dfplot <- merge(dfg, paramdf, by=c("subject", "rr", "pu"))
+
+# Summarizing the data
+pdf0 <- dfg %>%
+  group_by(subject, gsreverted, ou, pu, omega_cat) %>%
+  summarise_at("response", funs(mean, std.error), na.rm = TRUE)
+
+# Convert subject to factor
+pdf0$subject = as.factor(pdf0$subject)
+
+# Create new labels for subject
+new_labels <- setNames(as.character(1:140), levels(pdf0$subject))
+
+# Plot
+ggplot(pdf0, aes(x = gsreverted, y = mean, group = interaction(ou, pu), color = omega_cat)) +
+  geom_line(aes(group = interaction(ou, pu)), na.rm = TRUE, alpha = 0.6, show.legend = TRUE) +
+  labs(x = "Stimulus", y = "Expectancy ratings") +
+  ylim(0, 100) +
+  facet_wrap("subject", ncol = 14, labeller = labeller(subject = new_labels)) +
+  theme_classic() + 
+  theme(aspect.ratio = 1) +
+  
+  # Custom color scale
+  scale_color_manual(
+    values = c('darkred', 'darkblue'),
+    labels = c("Gaussian", "Monotonic")  # Changing legend labels
+  ) +
+  
+  # Customizing legend title (using expression to display Greek Omega)
+  labs(color = expression(Omega~"(binarised)")) + 
+  
+  # Customize axis text sizes
+  theme(
+    axis.title.x = element_text(size = 16),
+    axis.title.y = element_text(size = 16)
+  )
+
+#ggsave(path = paste0(data_path, "/plots/Supplement"), width = 5, height = 5, filename = 'gradients.png', device='png', dpi=700)
+```
+
+# Get Area under the curve as an approximation of generalisation amount
+```{r}
+# Summ by condition and distance 
+dfauc <- dfg %>%
+  arrange(subject, ou, pu, distance)
+
+# Get AUC using trapezoidal rule
+auc_results <- dfauc %>%
+  group_by(subject, ou, pu) %>%
+  summarise(AUC = sum((lead(distance) - distance) * 
+                      (response_recoded + lead(response_recoded)) / 2, na.rm = TRUE),
+  anx = first(anx),
+  omega_cat = first(omega_cat),
+  lambda = first(lambda),
+  offset = first(offset))
+
+# Get AUC x subject 
+auc_summary <- auc_results %>%
+  group_by(subject) %>%
+  summarise(
+    mean_AUC = mean(AUC, na.rm = TRUE),  # Average AUC across conditions
+    anx = first(anx),  # Retrieve unique anx value for each participant
+    omega_cat = first(omega_cat),
+    lambda = first(lambda), 
+    offset = first(offset)
+  )
+
+#Association of ANX and AUC
+cor.test(auc_results$anx, auc_results$AUC)
+
+#Association of AUC and lambda parameter 
+auc.anx <- lmer(data=auc_results, AUC ~lambda+(1|subject)) #for now ignore sing
+car::Anova(auc.anx, type = "II") #only fits without random effects
+summary(auc.anx)
+effectsize::eta_squared(auc.anx, alternative = "two.sided")
+```
+
+
+
+# #Fig. 4e: offset:AUC:lambda interaction 
+```{r}
+# Binarise offset
+dfauc2 <- auc_results %>%
+  mutate(offset_class = ifelse(offset < 0, "Negative", "Positive"),
+         rr = factor(ou, levels = c("low", "mid", "high")))
+
+# Create a grid of mean offsets classified by positive and negative
+grid <- dfauc2 %>%
+  group_by(AUC, lambda, offset_class) %>%
+  summarize(mean_offset = mean(offset), .groups = 'drop')
+
+custom_labels <- c("low" = "RR:25%", "mid" = "RR:50%", "high" = "RR:75%")
+
+ggplot() +
+  geom_tile(data = grid, aes(x = lambda, y = AUC, fill = offset_class)) +  # Fill with mean offset
+  geom_point(data = dfauc2, aes(x = lambda, y = AUC, color = offset_class), size = 1, alpha = 0.5) +  # Participant dots
+  labs(
+    title = "",
+    y = "AUC",
+    x = expression(paste("Generalisation width ", lambda)),
+    color = expression(paste(alpha)),  # Update color legend title with alpha
+    fill = expression(paste(alpha))
+  ) +
+  scale_color_manual(values = c("Positive" = "darkgrey", "Negative" = "darkblue")) +  # Custom colors for offset classes
+  scale_fill_manual(values = c("Positive" = "darkgrey", "Negative" = "darkblue")) + 
+  theme_classic() +
+  facet_grid(. ~ rr, labeller = labeller(rr = custom_labels)) +  # Apply custom labels here
+  theme(
+    aspect.ratio = 1,
+    legend.position = "right",  # Move legend to the right of the plot
+    legend.justification = c("center", "center"),  # Center legend vertically on the right side
+    legend.background = element_rect(fill = "white", color = NA),  # Optional: background for better readability
+    axis.title.y = element_text(margin = margin(t = 0, r = 15, b = 0, l = 0)),
+    axis.title.x = element_text(vjust = -0.4),
+    axis.line.x.bottom = element_line(size = 0.8),
+    axis.line.y.left = element_line(size = 0.8),
+    text = element_text(size = 13),
+    legend.title = element_text(size = 15)
+  )
+
+#ggsave(path = paste0(data_path, "/plots"), width = 5, height = 5, filename = 'auc.png', device='png', dpi=700)
+```
+
+
+# Offset parameter checks 
+```{r}
+#Negative relationship of lambda and offset, that differes for rr conditions 
+m.off <- lmer(data=paramdf, lambda ~ offset*rr+(1+rr|subject))
+car::Anova(m.off, type = "II") #only fits without random effects
+summary(m.off)
+effectsize::eta_squared(m.off, alternative = "two.sided")
+
+em <- emtrends(m.off, pairwise ~ rr, var = "offset", adjust="holm", type = "response")
+em
+contr = as.data.frame(em$contrasts)
+t_to_eta2(contr$t.ratio[3], contr$df[3], ci = 0.95, alternative = "two.sided")
+t_to_eta2(contr$t.ratio[2], contr$df[2], ci = 0.95, alternative = "two.sided")
+
+# offset x condition checks 
+m.alpha <- lmer(data=paramdf, offset ~ rr*pu + (1+rr+pu|subject))
+car::Anova(m.alpha, type = "II") #only fits without random effects
+summary(m.alpha)
+effectsize::eta_squared(m.alpha, alternative = "two.sided")
+
+emm.alpha <- emmeans(m.alpha, ~ rr, adjust="holm", type = "response")
+emm.alpha
+emm.contr <-summary(pairs(emm.alpha, adjust=adjustmethod))
+emm.contr
+t_to_eta2(emm.contr$t.ratio[2], emm.contr$df[2], ci = 0.95, alternative = "two.sided")
+t_to_eta2(emm.contr$t.ratio[3], emm.contr$df[3], ci = 0.95, alternative = "two.sided")
+```
+
+
+
+#Trait anxiety 
+
+# Average ratings for generalisation stimuli and TA
+```{r}
+pdf0 <- dfg[dfg$distance != 0,] %>%
+  group_by(subject, anx_z, gs) %>%
+  summarise_at("response_recoded", funs(mean,std.error),na.rm = TRUE)
+
+cor.test(pdf0$anx_z, pdf0$mean, method = "pearson")
+```
+
+# lm ratings ~ conditions & anxiety 
+```{r}
+# Flip data (based on model fit to have all gradients in same orientation)
+dfg$option_c = dfg$response_recoded
+for (s in unique(dfg$subject)){
+  for (c in unique(dfg$ou)){ 
+    for (p in unique(dfg$pu)){ 
+    dftemp = subset(dfg, subject == s & ou == c & pu == p & gsreverted == 4)
+    if (unique(dftemp$omega_cat) == 'linear'){
+      mean_cs_condition = mean(dftemp$response_recoded)
+      dfg$option_c[(dfg$gsreverted < 4 & dfg$subject == s & dfg$ou == c & dfg$pu == p)] <- mean_cs_condition - (dfg$option_c[(dfg$gsreverted < 4 & dfg$subject == s & dfg$ou == c& dfg$pu == p)] - mean_cs_condition) #add difference from mean 
+    }
+  }
+}
+}
+
+# Beta lm, effect of conditions & anx
+dfgs <- dfg[(dfg$option_c > 0 & dfg$option_c < 1), ] #subset responses for beta model 
+m.gen.glm<- glmmTMB::glmmTMB(data=dfgs, option_c ~ distance*anx_z*rr+ distance*anx_z*pu+omega_cat+(1+rr+pu+omega_cat|subject), family = beta_family(link="logit")) 
+car::Anova(m.gen.glm,type = "II") #anx*distance sig. 
+summary(m.gen.glm)
+
+# Effect of TA effect
+(distlist <- list( distance = c(0,1,2,3,4)))
+slopes <- modelbased::estimate_slopes(m.gen.glm, trend = "anx_z", at = distlist) 
+slopes
+```
+
+
+# Fig 5a: ANX effect: median split & Effectsize 
+```{r}
+# Median split into high and low TA
+dfg$anxcut <- gtools::quantcut(dfg$sticsa, q = c(0, 0.5, 1), labels = c("low","high"))
+
+pdf0 <- dfg %>%
+  group_by(distance, anxcut, subject) %>%
+  summarise_at("option_c", funs(mean),na.rm = TRUE)
+pdf0 <- pdf0 %>%
+  group_by(distance, anxcut) %>%
+  summarise_at("option_c", funs(mean,std.error),na.rm = TRUE)
+
+pdf0$lower = pdf0$mean - pdf0$std.error
+pdf0$upper = pdf0$mean + pdf0$std.error
+
+rr.labs <- c(" RR 25%", "RR 50%","RR 75%")
+names(rr.labs) <- c("low", "mid","high")
+
+# Main figure 
+w8 <- ggplot(pdf0, aes(x=distance, y=mean,  group=anxcut, fill = anxcut))+ 
+  geom_linerange(data = pdf0, aes(ymin = lower, ymax = upper, group = anxcut, color = anxcut), size=0.8, show.legend = FALSE)+
+  theme_classic()+
+  scale_color_manual(values = c("darkblue", "purple"))+
+  scale_fill_manual(values = c("darkblue", "purple"))+ 
+  geom_ribbon(data=pdf0, aes(ymin = lower, ymax = upper,group = anxcut, fill = anxcut), alpha = 0.5)+
+  geom_line(aes(col = anxcut),  na.rm = TRUE,size=0.8, show.legend = FALSE)+
+  labs(x = "Distance from CS+", y = "Expectancy ratings")+
+  theme(strip.background = element_rect(fill = "#EAEAEA",color = "#EAEAEA"),panel.spacing = unit(0.5, "lines"))+
+  theme_classic() +
+    theme(
+    axis.title.y = element_text(margin = margin(r = 15)),
+    axis.title.x = element_text(vjust = -0.4),
+    axis.line.x.bottom = element_line(size = 0.8),
+    axis.line.y.left = element_line(size = 0.8),
+    text = element_text(size = 18),
+    aspect.ratio = 1.5,
+    legend.position = "none"
+    )+
+  scale_fill_manual( values = c("low" = "darkblue", "high" = "purple"), labels = c("low TA", "high TA"))+
+  theme(legend.position = c(0.8, 0.6),legend.title = element_text(size=texxt))+
+  labs(fill = "")+scale_y_continuous(limits = c(NA, 0.75))
+w8
+
+# Figure insert 
+anxfi <- ggplot(data = slopes, aes(x = distance, y = Coefficient)) +
+  geom_ribbon(aes(ymin = CI_low, ymax = CI_high), fill = "grey", alpha = 0.2) +
+  geom_line(color = "darkgrey", size = 0.6) +
+  geom_hline(yintercept = 0, color = "black", linetype = "dashed", size = 0.5) + 
+  theme_classic() +
+  theme(
+    axis.title.y = element_text(margin = margin(r = 15)),
+    axis.title.x = element_text(vjust = -0.4),
+    axis.line.x.bottom = element_blank(),  # Ensure the x-axis line is removed
+    axis.line.y.right = element_line(size = 0.8),  # Move the y-axis line to the right side
+    axis.text.y.right = element_text(size = 15),  # Place y-axis text on the right
+    axis.ticks.y.right = element_line(size = 0.8),
+    axis.text.x = element_blank(),  # Remove x-axis labels
+    axis.ticks.x = element_blank(),  # Remove x-axis ticks
+    text = element_text(size = 16),
+    aspect.ratio = 0.3,
+    legend.position = "none",
+    plot.margin = margin(0, 0, 0, 0)  # Remove any margins that could push x-axis back
+  ) +
+  xlab("") +
+  ylab("Effect of TA") +
+  scale_y_continuous(position = "right")  # Place y-axis on the right
+
+anxfi
+
+# Combine plots 
+grob_anxfi <- ggplotGrob(anxfi)
+final_plot <- w8 + 
+  annotation_custom(grob_anxfi, 
+                    xmin = min(pdf0$distance)-0.2, xmax = max(pdf0$distance)+1.5,  # Full width
+                    ymin = min(pdf0$mean)+0.35, ymax = min(pdf0$mean) + 0.65)  # Adjust ymin and ymax to place inset plot
+
+print(final_plot)
+ggsave(path = paste0(data_path, "/plots"), width = 5, height = 5, filename = 'anxeffect.png', device='png', dpi=700) #or 3/6
+```
+
+
+
+# Lambda and anx (and offset)
+```{r}
+# No association of Lambda and TA
+m.lambda.anx.only <- lmer(data=paramdf, lambda ~anx_z+(1|subject))
+car::Anova(m.lambda.anx.only, type = "II")
+summary(m.lambda.anx.only)
+
+# However interacting with offset and reinforcement rate condition
+m.lambda.anx.offset <- lmer(data=paramdf, lambda ~anx_z*offset*rr+(1+rr|subject))
+car::Anova(m.lambda.anx.offset, type = "II")
+summary(m.lambda.anx.offset)
+effectsize::eta_squared(m.lambda.anx.offset, alternative = "two.sided")
+
+em <- emtrends(m.lambda.anx.offset, pairwise ~ rr|offset, var = "anx_z", adjust="holm", type = "response")
+em
+```
+
+
+#RHO: check if rho matches our uncertainty manipulation
+```{r}
+rho_df<- read.csv(paste0(data_path, "/outputs/fitting/fittedparameters_perceptualmodel.csv" ),header = TRUE)
+rho_df$subject = rho_df$sub
+rho_df$rr[rho_df$rr == 25] = "low"
+rho_df$rr[rho_df$rr == 50] = "mid"
+rho_df$rr[rho_df$rr == 75] = "high"
+rho_df$pu[rho_df$pu == "low"] = 0
+rho_df$pu[rho_df$pu == "high"] = 1
+rho_df$pu_cat = as.factor(rho_df$pu)
+rho_df <- merge(rho_df, paramdf, by=c("subject", "rr", "pu"))
+
+#descriptives for supplementary 
+param_descr = rho_df %>%
+  group_by(subject, omega_cat) %>%
+  summarise_at(c("rho"),funs(mean),na.rm = TRUE)
+
+param_descr = param_descr %>%
+  group_by(omega_cat) %>%
+  summarise_at(c("rho"),funs(mean),na.rm = TRUE)
+
+param_descr
+
+
+#check if it deviates from expected 30%
+dfs <- rho_df%>% 
+  group_by(subject, rr,pu, omega_cat) %>% 
+  summarise_at(c("rho"), mean)
+
+t.test(dfs$rho, mu = 0.3, alternative = "two.sided")
+t.test(dfs$rho[grep("gaussian", dfs$omega_cat)], mu = 0.3, alternative = "two.sided") #not sig
+t.test(dfs$rho[grep("linear", dfs$omega_cat)], mu = 0.3, alternative = "two.sided")
+
+
+#by pu not really there
+param_descr = rho_df[rho_df$omega_cat == "gaussian",] %>%
+  group_by(subject, pu) %>%
+  summarise_at(c("rho"),funs(mean),na.rm = TRUE)
+
+param_descr = param_descr %>%
+  group_by(pu) %>%
+  summarise_at(c("rho"),funs(mean),na.rm = TRUE)
+
+param_descr
+```
+
+
+# Check if something can explain mechanisms or patterns
+
+# Does ANX predict best fitting model? (per condition: BIC differences)
+```{r}
+# Get fit data
+dfbestcond<- read.csv(paste0(data_path, "/outputs/bestfittingmodel.csv" ),header = TRUE)
+
+# Get fit difference x condition, #positive is value = better
+dfbestcond$BICDIFFpercvalueR1P1 = dfbestcond$full_BIC_perc_estR1P1 - dfbestcond$full_BIC_value_alt_offsetR1P1
+dfbestcond$BICDIFFpercvalueR1P2 = dfbestcond$full_BIC_perc_estR1P2 - dfbestcond$full_BIC_value_alt_offsetR1P2
+dfbestcond$BICDIFFpercvalueR2P1 = dfbestcond$full_BIC_perc_estR2P1 - dfbestcond$full_BIC_value_alt_offsetR2P1
+dfbestcond$BICDIFFpercvalueR2P2 = dfbestcond$full_BIC_perc_estR2P2 - dfbestcond$full_BIC_value_alt_offsetR2P2
+dfbestcond$BICDIFFpercvalueR3P1 = dfbestcond$full_BIC_perc_estR3P1 - dfbestcond$full_BIC_value_alt_offsetR3P1
+dfbestcond$BICDIFFpercvalueR3P2 = dfbestcond$full_BIC_perc_estR3P2 - dfbestcond$full_BIC_value_alt_offsetR3P2
+
+# Change format
+dfbestcond = dfbestcond %>% 
+  tidyr::pivot_longer(
+    cols = starts_with("BICDIFFpercvalue"), 
+    names_to = "condition", 
+    values_to = "DIFFpercvalue",
+    values_drop_na = TRUE
+  )
+
+dfbestcond$pu = NA
+dfbestcond$rr = NA
+dfbestcond$pu[grepl("P1", dfbestcond$condition)] <- "0" 
+dfbestcond$pu[grepl("P2", dfbestcond$condition)] <- "1"
+dfbestcond$rr[grepl("R1", dfbestcond$condition)] <- "low"
+dfbestcond$rr[grepl("R2", dfbestcond$condition)] <- "mid"
+dfbestcond$rr[grepl("R3", dfbestcond$condition)] <- "high"
+```
+
+
+```{r}
+#Reduce to one observation per condition
+pdf0 <- dfbestcond %>% 
+  group_by(sub, rr,pu) %>% 
+  summarise_at(c("DIFFpercvalue"), mean)
+
+#Add anxiety 
+pdf0$subject = pdf0$sub
+pdf2 <- dfg %>% 
+  group_by(subject, rr, pu) %>% 
+  summarise_at(c("anx"), mean)
+
+#Fit anxiety model 
+df <- merge(pdf0,pdf2, by=c("subject","rr", "pu"))
+df$anx_z <- (df$anx-mean(df$anx))/sd(df$anx)
+
+m.anxonly2 =lmer(DIFFpercvalue~anx*rr*pu+(1+rr+pu|sub), data = df)
+car::Anova(m.anxonly2, type = "II")
+summary(m.anxonly2)
+effectsize::eta_squared(m.anxonly2, alternative = "two.sided")
+
+#library(WRS2) 
+
+#cor relative model fit and TA
+cor.test(df$DIFFpercvalue, df$anx, method = "pearson")
+#pbcor(df$DIFFpercvalue, df$anx)
+
+#bootstrapped CI 
+boot_corr <- boot(df, function(df, indices) cor(df[indices, "DIFFpercvalue"], df[indices, "anx"]), R = 1000)
+boot_corr
+ci_result <- boot.ci(boot_corr, type = "perc")
+ci_result
+
+
+# Fig. 5c: Association of TA and relative model fit 
+pdfX <- df %>%
+  group_by(sub, anx) %>%
+  summarise_at(c("DIFFpercvalue"), funs(mean,std.error),na.rm = TRUE)
+
+w9 <- ggplot(data=pdfX, aes(x = mean, y = anx)) +
+  geom_point() +
+  stat_smooth(method = "lm", formula = y ~ x, color = 'black', size = 0.8) +
+  ylab("Trait Anxiety") +
+  xlab("BIC difference: P-V") +
+  theme_classic() +
+    theme(
+    axis.title.y = element_text(margin = margin(r = 15)),
+    axis.title.x = element_text(vjust = -0.4),
+    axis.line.x.bottom = element_line(size = 0.8),
+    axis.line.y.left = element_line(size = 0.8),
+    text = element_text(size = 18),
+    aspect.ratio = 1.5,
+    legend.position = "none"
+    )+
+  annotate("text", x = min(pdfX$mean), y = max(pdfX$anx) - 5, 
+           label = bquote(rho == .(0.131) * "," * CI[95*"%"] * "[" * .(0.05) * "," * .(0.20) * "]"), 
+         hjust = 0, vjust = 1, size = 4.5)  # Adjusted y position and annotation size
+w9
+
+#ggsave(path = paste0(data_path, "/plots"), width = 5, height = 5, filename = 'bicdiffsanx.png', device='png', dpi=700) 
+```
+
+
+
+```{r}
+## NO anx difference at CS+ rating (similar to no anx effect after learning)
+
+csmod <- glmmTMB::glmmTMB(data=dfg[dfg$distance == 0,], response_recoded ~ anx_z+(1+rr|subject), family = beta_family(link="logit")) 
+car::Anova(csmod)
+summary(csmod)
+```
+
+# ANX does not predict pattern (for VALUE subset)
+```{r}
+m.r.a <- glmer(omega_cat ~ anx_z +(1|subject), data = paramdf[paramdf$bestfit == "VALUE",],family = "binomial")
+car::Anova(m.r.a)
+```
+
+#check if ppt best fit by one or other mechanism differ in titration/snapshot or learning 
+```{r}
+# A) Titration
+dft <- merge(dft,paramdf[,c("subject","condition","bestfit", "omega_cat")], by=c("subject","condition"))
+
+# Get rid of repeated entries for regression
+dfreg <- dft %>% 
+  group_by(subject, pu, color,bestfit, anx, iou, omega_cat) %>% 
+  summarise_at(c("acc_final"), mean)
+
+# Accuracy as predicted by model fit --> not sig. 
+dfreg$bestfit = as.factor(dfreg$bestfit)
+m.acc.mech <- lmer(acc_final ~ bestfit +(1+bestfit|subject) + (1|pu), data = dfreg)
+car::Anova(m.acc.mech, type = "II")
+summary(m.acc.mech)
+
+#For value subset, pattern effect --> not sig.
+m.acc.mech <- lmer(acc_final ~ omega_cat +(1+omega_cat|subject) + (1|pu), data = dfreg[dfreg$bestfit == "VALUE",])
+car::Anova(m.acc.mech, type = "II")
+summary(m.acc.mech)
+
+
+# B) Snapshot 
+dfX <- merge(dfss, paramdf, by=c("subject", "condition"))
+dfX$bestfit = as.factor(dfX$bestfit)
+dfX = dfX[,c("subject", "response_recoded", "block", "distance","bestfit", "pu.x", "omega_cat")]
+
+#No effect of model fit on perceived similarity 
+m.snap.glm.mech <- glmmTMB::glmmTMB(data=dfX, response_recoded ~ bestfit+(1+bestfit|subject) + (1|pu.x), family = beta_family(link="logit")) 
+car::Anova(m.snap.glm.mech, type = "II")
+
+#subset, pattern not sig
+m.snap.glm.mech <- glmmTMB::glmmTMB(data=dfX[dfX$bestfit == "VALUE",], response_recoded ~ omega_cat+(1+omega_cat|subject) + (1|pu.x), family = beta_family(link="logit")) 
+car::Anova(m.snap.glm.mech, type = "II")
+
+
+# C) Learning 
+dfll <- merge(dfll, paramdf, by=c("subject", "condition"))
+dfll$bestfit = as.factor(dfll$bestfit)
+
+#check for differences in mechanism 
+m.learn.glm.anx <- glmmTMB::glmmTMB(data=dfll, response_recoded ~bestfit+(1+bestfit|subject) + (1|ou), family = beta_family(link="logit"))
+car::Anova(m.learn.glm.anx, type = "II") 
+summary(m.learn.glm.anx)
+
+#check for differences in pattern (value only )
+m.learn.glm.anx <- glmmTMB::glmmTMB(data=dfll[dfll$bestfit == "VALUE",], response_recoded ~omega_cat +(1+omega_cat|subject) + (1|ou), family = beta_family(link="logit"))
+car::Anova(m.learn.glm.anx, type = "II") #marg?
+
+#ETA 2
+m.learn.lmer <- lmer(data=dfll[dfll$bestfit == "VALUE",], response_recoded ~omega_cat +(1+omega_cat|subject) + (1|ou))
+car::Anova(m.learn.lmer, type = "II", test= "F")
+effectsize::eta_squared(m.learn.lmer, alternative = "two.sided")
+
+#post-hoc ou
+emm.learn <- emmeans(m.learn.glm.anx, ~ omega_cat, adjust=adjustmethod, type = "response")
+emm.learn
+emm.contr <-summary(pairs(emm.learn, adjust=adjustmethod))
+emm.contr
+```
+
+
+
+
+
+
+

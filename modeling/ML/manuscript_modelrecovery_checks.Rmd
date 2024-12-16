@@ -1,0 +1,243 @@
+---
+title: "Model recovery"
+author: "LV"
+date: "2024-01-10"
+output: html_document
+---
+
+Script takes model recovery simulation outputs and checks for model recovery, 
+Plots confusion matrix for
+
+A) Recovery: Value vs. perceptual 
+B) Reduced parametrization: Gauss Value (alpha =0) vs. perceptual 
+
+# Get environment right
+```{r}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load("renv", "here", "knitr", "dplyr")
+
+here::i_am("flag_project_root.R")
+here::here()
+data_path = here::here()
+
+#renv::activate(project=here::here())
+#renv::restore(project=here::here()) #when asked to activate: NO!
+#renv::snapshot()
+
+packages <- c("ggplot2", "dplyr", "stats","lme4", "here", "renv","gtools", "see","plotrix","modelbased","emmeans", "performance", "tidyverse", "ggsignif","broom","quickpsy", "ggpubr", "performance","glmmTMB", "loo", "bayesplot","rlang","bayestestR", "rstan","brms","tidybayes","sjPlot","sjmisc","yardstick","effectsize","datawizard","esc","grid","lsr","gridExtra")
+
+# load the packages from lock 
+lapply(packages, library, character.only = TRUE)
+```
+
+
+#Model recovery perceptual vs value model 
+
+# Get and prep data
+```{r}
+## Define paths 
+outs = here::here('outputs', 'model_recovery','ITER30LINONE') #change in bounds
+outs2 = here::here('outputs', 'model_recovery','ITER30GAUSSONE') #change in bounds
+
+all_files <- list.files(path = outs, pattern = "\\.csv$", full.names = TRUE)
+all_files2 <- list.files(path = outs2, pattern = "\\.csv$", full.names = TRUE)
+
+# Get all files
+csv_files <- all_files[grep(".csv", all_files, ignore.case = TRUE) &
+                       grepl("recovery", all_files, ignore.case = TRUE)]
+csv_files2 <- all_files2[grep(".csv", all_files2, ignore.case = TRUE) &
+                       grepl("recovery", all_files, ignore.case = TRUE)]
+  
+# Read in CSV files into a list of data frames
+data_list <- lapply(csv_files, read.csv)
+data_list2 <- lapply(csv_files2, read.csv)
+df2 <- do.call(rbind, data_list)
+df22 <- do.call(rbind, data_list2)
+df22$sub = paste0(df22$sub, "X")
+
+df <- rbind(df2,df22)
+df2 <- df
+df2 <- df2 %>% select(where(~ !all(is.na(.))))
+```
+
+# Get cumulative BIC across iterations and and conditions
+```{r}
+all_cols = c()
+
+# All model combinations of interest
+all_combi = c("BIC_perc_est_perc_est", "BIC_perc_est_value_alt_offset", "BIC_perc_est_full_alt_offset_gen", "BIC_value_alt_offset_perc_est", "BIC_value_alt_offset_value_alt_offset", "BIC_value_alt_offset_full_alt_offset_gen", "BIC_full_alt_offset_gen_perc_est", "BIC_full_alt_offset_gen_value_alt_offset", "BIC_full_alt_offset_gen_full_alt_offset_gen", "BIC_perc_est_ns2", "BIC_value_alt_offset_ns2", "BIC_full_alt_offset_gen_ns2", "BIC_ns2_ns2", "BIC_ns2_value_alt_offset", "BIC_ns2_full_alt_offset_gen","BIC_ns2_perc_est")
+
+# Group by subject and combination, then find the minimum for each combination
+df2 <- df2 %>%
+  group_by(sub) %>%
+  mutate(across(all_of(all_combi), ~min(.), .names = "full_{.col}")) %>%
+  ungroup()
+
+# Select relevant columns
+dff <- df2[, c("full_BIC_perc_est_perc_est", "full_BIC_perc_est_value_alt_offset", "full_BIC_value_alt_offset_perc_est", "full_BIC_value_alt_offset_value_alt_offset","sub","iter")] 
+
+# One row x ppt.
+dff = dff[dff$iter == 1, ]
+dff$simulated = NA
+dff <- dff[, -which(names(dff) == "iter")]
+
+# Pivot and bring to pretty format
+dfr <- dff %>%
+   select(c("full_BIC_perc_est_perc_est", "full_BIC_perc_est_value_alt_offset", "full_BIC_value_alt_offset_perc_est", "full_BIC_value_alt_offset_value_alt_offset","sub")) %>%
+  pivot_longer(cols = c("full_BIC_perc_est_perc_est", "full_BIC_perc_est_value_alt_offset", "full_BIC_value_alt_offset_perc_est", "full_BIC_value_alt_offset_value_alt_offset"), names_to = "model", values_to = "BIC") 
+
+dfr$model = paste0(dfr$model, "X")
+dfr$simulated = NA
+dfr$simulated[grepl("BIC_perc_est", dfr$model)] <- "perception"
+dfr$simulated[grepl("BIC_value_alt_offset", dfr$model)] <- "value_alt_offset"
+
+dfr$fitted = NA
+dfr$fitted[grepl("perc_estX", dfr$model)] <- "perception"
+dfr$fitted[grepl("value_alt_offsetX", dfr$model)] <- "value_alt_offset"
+```
+
+
+# Check which model fit best depending on simulation
+```{r}
+dfr$best_fit = NA
+dfr <- dfr %>%
+  group_by(sub, simulated) %>%
+  mutate(best_fit = fitted[which.min(BIC)]) %>%
+  ungroup()
+
+# Extract one row per sub/simulated instance
+fdf <- dfr %>%
+  group_by(sub, simulated) %>%
+  slice_min(order_by = BIC, n = 1) %>%
+  ungroup()
+
+# Finalize subsets
+fdfa <- fdf %>%
+  select(simulated, best_fit, BIC)
+
+fdf <- fdf %>%
+  select(simulated, best_fit)
+```
+
+
+# Plot
+```{r}
+# Rename
+fdf$simulated[fdf$simulated == "value_alt_offset"] = "value"
+fdf$best_fit[fdf$best_fit == "value_alt_offset"] = "value"
+
+# Define levels
+possible_levels <- c("perception","value")
+fdf$simulated <- factor(fdf$simulated, levels = possible_levels)
+fdf$best_fit <- factor(fdf$best_fit,
+                 levels = possible_levels)
+
+# Confusion matrix
+cm <- yardstick::conf_mat(fdf, simulated, best_fit)
+
+# Plot as heatmap 
+ggplot2::autoplot(cm, type = "heatmap") +
+  scale_fill_gradient(low = "#ABA8BE", high = "#F5D9C2")+theme(aspect.ratio = 1)+xlab("true model")+ylab("recovered model")+theme(text = element_text(size = 20))
+
+# save
+#ggsave(path = paste0(data_path, "/plots"), width = 5, height = 5, filename = 'modelrec.png', device='png', dpi=700) 
+```
+
+
+
+
+
+#Model recovery for reduced parametrization: Gaussian value model (offset fixed at 0) vs. Perceptual model 
+
+```{r}
+# Get data 
+outs = here::here('outputs', 'model_recovery', 'ITER30ALPHAZERO120')
+all_files <- list.files(path = outs, pattern = "\\.csv$", full.names = TRUE)
+csv_files <- all_files[grep(".csv", all_files, ignore.case = TRUE) &
+                       grepl("recovery", all_files, ignore.case = TRUE)]
+# Read in CSV files into a list of data frames
+data_list <- lapply(csv_files, read.csv)
+df2 <- do.call(rbind, data_list)
+df2 <- df2 %>% select(where(~ !all(is.na(.))))
+```
+
+
+# Get cumulative BIC across iterations and and conditions
+```{r}
+all_cols = c()
+all_combi = c("BIC_perc_est_perc_est", "BIC_perc_est_value_alt_offset", "BIC_value_alt_offset_perc_est", "BIC_value_alt_offset_value_alt_offset")
+
+for (s in unique(df2$sub)){
+  for (ic in all_combi){
+    
+  df2temp = subset(df2, sub == s)
+  df2s <- df2temp %>% select(ic)
+  full_add = min(df2s)
+  df2[[paste0("full_", ic)]][df2$sub == s] <- full_add
+  }
+}
+
+#get relevant columns and one row x ppt
+dff <- df2[, c("full_BIC_perc_est_perc_est", "full_BIC_perc_est_value_alt_offset", "full_BIC_value_alt_offset_perc_est", "full_BIC_value_alt_offset_value_alt_offset","sub","iter")] 
+
+dff = dff[dff$iter == 1, ]
+dff$simulated = NA
+dff <- dff[, -which(names(dff) == "iter")]
+
+dfr <- dff %>%
+   select(c("full_BIC_perc_est_perc_est", "full_BIC_perc_est_value_alt_offset", "full_BIC_value_alt_offset_perc_est", "full_BIC_value_alt_offset_value_alt_offset","sub")) %>%
+  pivot_longer(cols = c("full_BIC_perc_est_perc_est", "full_BIC_perc_est_value_alt_offset", "full_BIC_value_alt_offset_perc_est", "full_BIC_value_alt_offset_value_alt_offset"), names_to = "model", values_to = "BIC") 
+
+dfr$model = paste0(dfr$model, "X")
+
+dfr$simulated = NA
+dfr$simulated[grepl("BIC_perc_est", dfr$model)] <- "perception"
+dfr$simulated[grepl("BIC_value_alt_offset", dfr$model)] <- "value_alt_offset"
+
+dfr$fitted = NA
+dfr$fitted[grepl("perc_estX", dfr$model)] <- "perception"
+dfr$fitted[grepl("value_alt_offsetX", dfr$model)] <- "value_alt_offset"
+```
+
+
+# Check which model fit best depending on simulation
+```{r}
+dfr$best_fit = NA
+dfr <- dfr %>%
+  group_by(sub, simulated) %>%
+  mutate(best_fit = fitted[which.min(BIC)]) %>%
+  ungroup()
+
+# Extract one row per sub/simulated instance
+fdf <- dfr %>%
+  group_by(sub, simulated) %>%
+  slice_min(order_by = BIC, n = 1) %>%
+  ungroup()
+
+# Finalize subsets
+fdfa <- fdf %>%
+  select(simulated, best_fit, BIC)
+
+fdf <- fdf %>%
+  select(simulated, best_fit)
+```
+
+
+
+
+```{r}
+fdf$simulated[fdf$simulated == "value_alt_offset"] = "value"
+fdf$best_fit[fdf$best_fit == "value_alt_offset"] = "value"
+
+possible_levels <- c("perception","value")
+fdf$simulated <- factor(fdf$simulated, levels = possible_levels)
+fdf$best_fit <- factor(fdf$best_fit,
+                 levels = possible_levels)
+
+cm <- yardstick::conf_mat(fdf, simulated, best_fit)
+
+autoplot(cm, type = "heatmap") +
+  scale_fill_gradient(low = "#ABA8BE", high = "#F5D9C2")+theme(aspect.ratio = 1)+xlab("true model")+ylab("recovered model")+theme(text = element_text(size = 20))
+
+#ggsave(path = paste0(data_path, "/plots/Supplement"), width = 5, height = 5, filename = 'modelrecalpha0.png', device='png', dpi=700) 
+```

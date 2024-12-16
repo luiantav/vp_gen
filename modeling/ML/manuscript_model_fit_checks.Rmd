@@ -1,0 +1,288 @@
+---
+title: "Check model fits and format for analysis"
+author: "LV"
+date: "2024-01-10"
+output: html_document
+---
+
+# Get environment right
+```{r}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load("renv", "here", "knitr", "dplyr")
+
+here::i_am("flag_project_root.R")
+here::here()
+data_path = here::here()
+
+#renv::activate(project=here::here())
+renv::restore(project=here::here()) #when asked to activate: NO!
+#renv::snapshot()
+
+packages <- c("ggplot2", "dplyr", "stats","lme4", "here", "renv","gtools", "see","plotrix","modelbased","emmeans", "performance", "tidyverse", "ggsignif","broom","quickpsy", "ggpubr", "performance","glmmTMB", "loo", "bayesplot","rlang","bayestestR", "rstan","brms","tidybayes","sjPlot","sjmisc","yardstick","effectsize","datawizard","esc","grid","lsr","gridExtra")
+
+# load the packages from lock 
+lapply(packages, library, character.only = TRUE)
+```
+
+
+
+# Paths & get data 
+```{r}
+outs = here::here('outputs','fitting', 'ITER30') 
+
+# Get fitted parameters & make them into df
+all_files <- list.files(path = outs, pattern = "\\.csv$", full.names = TRUE)
+csv_files <- all_files[grep(".csv", all_files, ignore.case = TRUE) & grepl("fits_", all_files, ignore.case = TRUE)]
+data_list <- lapply(csv_files, read.csv)
+df <- do.call(rbind, data_list)
+
+source(here::here('modeling', 'ML', "helper_func.R"))
+```
+
+#get best model overall (ignoring conditions)
+```{r}
+# Define models of interest: PERC and VALUE model
+all_combi = c("BIC_perc_estR","BIC_value_alt_offsetR")
+
+#get best iteration & best fit x ppt 
+for (s in unique(df$sub)){
+  for (ic in all_combi){
+    
+    #subset ppt. + get relevant BIC columns for each model and condition 
+    dftemp = subset(df, sub == s)
+    df2 = dftemp[, grepl(ic, names(dftemp))]
+    
+    #find smallest BIC across iterations
+    full_means <- apply(df2, 2, min)
+    
+    #sum BIC for all conditions to get overall fit
+    full_add <- sum(full_means,na.rm = TRUE)
+    df[[paste0("full_", ic)]][df$sub == s] <- full_add
+    }
+}
+
+# Drop unnecessary repetitions 
+dfs = df[df$iter == 1,]
+
+# Get min BIC and index corresponding model name 
+dfs$best_fitting = apply(dfs[c("full_BIC_perc_estR","full_BIC_value_alt_offsetR")], 1, min)
+dfs$max_col = colnames(dfs[c("full_BIC_perc_estR","full_BIC_value_alt_offsetR")])[apply(dfs[c("full_BIC_perc_estR","full_BIC_value_alt_offsetR")], 1, which.min)]
+
+# Considering across conditions (1 BIC x subject), 8% were best fitted by perceptual 
+table(dfs$max_col) #0.08571429
+
+#BIC overall x model 
+full_add <- apply(dfs[c("full_BIC_perc_estR","full_BIC_value_alt_offsetR")], 2, sum)
+full_add
+```
+
+
+# Get best fit x condition
+```{r}
+# Define the BIC conditions and models
+all_combi <- c(
+  "BIC_perc_estR1P1", "BIC_perc_estR1P2", "BIC_perc_estR2P1", "BIC_perc_estR2P2", "BIC_perc_estR3P1", "BIC_perc_estR3P2",
+  "BIC_value_alt_offsetR1P1", "BIC_value_alt_offsetR1P2", "BIC_value_alt_offsetR2P1", "BIC_value_alt_offsetR2P2", 
+  "BIC_value_alt_offsetR3P1", "BIC_value_alt_offsetR3P2"
+)
+
+# Get the best iteration x condition & participant
+df <- df %>%
+  group_by(sub) %>%
+  mutate(across(all_combi, ~ min(.x, na.rm = TRUE), .names = "full_{col}")) %>%
+  ungroup()
+
+# Filter out unnecessary iterations
+dfs <- df %>%
+  filter(iter == 1)
+
+# Find best fitting for each condition and model
+conditions <- c("R1P1", "R1P2", "R2P1", "R2P2", "R3P1", "R3P2")
+
+for (cond in conditions) {
+  dfs <- dfs %>%
+    mutate(
+      !!paste0("best_fitting", cond) := pmin(
+        .data[[paste0("full_BIC_perc_est", cond)]],
+        .data[[paste0("full_BIC_value_alt_offset", cond)]],
+        na.rm = TRUE
+      ),
+      !!paste0("max_col", cond) := ifelse(
+        .data[[paste0("full_BIC_perc_est", cond)]] <= 
+          .data[[paste0("full_BIC_value_alt_offset", cond)]],
+        paste0("full_BIC_perc_est", cond),
+        paste0("full_BIC_value_alt_offset", cond)
+      )
+    )
+}
+
+# Reformat and pivot longer
+dfs <- dfs %>%
+  pivot_longer(
+    cols = starts_with("max_col"), 
+    names_to = "cond", 
+    values_to = "bestfit"
+  ) %>%
+  mutate(
+    cond = gsub("max_col", "", cond),  # Clean up condition names
+    bestfit = case_when(
+      grepl("perc", bestfit) ~ "PERC",
+      grepl("value", bestfit) ~ "VALUE",
+      TRUE ~ bestfit
+    )
+  ) %>%
+  mutate(cond = factor(cond, levels = conditions))
+```
+
+
+```{r}
+# Best fit % of gradients
+tbc = table(dfs$bestfit)
+tab_percent <- prop.table(tbc) * 100  # margin = 2 for column-wise percentages
+tab_percent = as.data.frame(tab_percent)
+tab_percent
+
+```
+
+
+
+
+# Get parameters in pretty format for later analysis in main analysis script
+```{r}
+# Init. variables 
+rho_perc_est <- rho_full_alt_offset_gen <- lambda_full_alt_offset_gen <- omega_full_alt_offset_gen <- offset_full_alt_offset_gen <- lambda_value_alt_offset <- omega_value_alt_offset<- offset_value_alt_offset <- vsd_ns2 <- basesd_ns2 <- NA
+
+# Get parameters for best iteration x model 
+haa = get_parameters2(df) #wrangling 
+
+# Drop unnecessary repetitions 
+dfs = haa[haa$iter == 1,]
+```
+
+
+# PERC MODEL: RHO
+```{r}
+full <- dfs %>%
+  select(contains(c("rho_perc","sub","rulereverted")))
+
+wrang = full %>% 
+  tidyr::pivot_longer(
+    cols = starts_with(c("rho")), 
+    names_to = "rho", 
+    values_drop_na = TRUE
+  )
+
+wrang$pu = NA
+wrang$rr = NA
+wrang$pu[grepl("P1", wrang$rho)] <- "low"
+wrang$pu[grepl("P2", wrang$rho)] <- "high"
+
+wrang$rr[grepl("R1", wrang$rho)] <- "25"
+wrang$rr[grepl("R2", wrang$rho)] <- "50"
+wrang$rr[grepl("R3", wrang$rho)] <- "75"
+
+wrang_perc = wrang
+#pw = wrang
+
+#save perc parameters
+colnames(wrang_perc)[colnames(wrang_perc) == "rho"] <- "RH"
+colnames(wrang_perc)[colnames(wrang_perc) == "value"] <- "rho"
+wrang_perc$model = 'perc'
+ndf <- wrang_perc[, c("sub", "rr", "pu", "rho", "model")]
+
+#write.csv(ndf, here::here('outputs', 'fitting', paste0("fittedparameters_perceptualmodel.csv")))
+```
+
+
+
+# VALUE Model parameters
+```{r}
+full <- dfs %>%
+  select(contains(c("omega_value_alt_offset","sub","rulereverted")))
+
+wrang = full %>% 
+  tidyr::pivot_longer(
+    cols = starts_with(c("omega")), 
+    names_to = "omega", 
+    values_drop_na = TRUE
+  )
+
+wrang$pu = NA
+wrang$rr = NA
+wrang$pu[grepl("P1", wrang$omega)] <- "low"
+wrang$pu[grepl("P2", wrang$omega)] <- "high"
+
+wrang$rr[grepl("R1", wrang$omega)] <- "25"
+wrang$rr[grepl("R2", wrang$omega)] <- "50"
+wrang$rr[grepl("R3", wrang$omega)] <- "75"
+wrang$model_rule = ifelse(wrang$value < 0.5, "linear", "gaussian")
+
+value_alt_omega = wrang #for saving
+```
+
+#Lambda
+```{r}
+full <- dfs %>%
+  select(contains(c("lambda_value_alt_offset","sub",'rulereverted')))
+
+wrang = full %>% 
+  tidyr::pivot_longer(
+    cols = starts_with(c("lambda")), 
+    names_to = "lambda", 
+    values_drop_na = TRUE
+  )
+
+wrang$pu = NA
+wrang$rr = NA
+wrang$pu[grepl("P1", wrang$lambda)] <- "low"
+wrang$pu[grepl("P2", wrang$lambda)] <- "high"
+
+wrang$rr[grepl("R1", wrang$lambda)] <- "25"
+wrang$rr[grepl("R2", wrang$lambda)] <- "50"
+wrang$rr[grepl("R3", wrang$lambda)] <- "75"
+
+value_alt_lambda = wrang
+```
+
+#OFFSET
+```{r, out.width="25%"}
+full <- dfs %>%
+  select(contains(c("offset_value_alt_offset","sub","rulereverted","rule_value_alt_off")))
+
+wrang = full %>% 
+  tidyr::pivot_longer(
+    cols = starts_with(c("offset")), 
+    names_to = "offset", 
+    values_drop_na = TRUE
+  )
+
+wrang$pu = NA
+wrang$rr = NA
+wrang$pu[grepl("P1", wrang$offset)] <- "low"
+wrang$pu[grepl("P2", wrang$offset)] <- "high"
+
+wrang$rr[grepl("R1", wrang$offset)] <- "25"
+wrang$rr[grepl("R2", wrang$offset)] <- "50"
+wrang$rr[grepl("R3", wrang$offset)] <- "75"
+
+value_alt_offset = wrang
+```
+
+# Join value parameters and save to csv
+```{r}
+colnames(value_alt_omega)[colnames(value_alt_omega) == "omega"] <- "OM"
+colnames(value_alt_omega)[colnames(value_alt_omega) == "value"] <- "omega"
+colnames(value_alt_lambda)[colnames(value_alt_lambda) == "lambda"] <- "LMD"
+colnames(value_alt_lambda)[colnames(value_alt_lambda) == "value"] <- "lambda"
+colnames(value_alt_offset)[colnames(value_alt_offset) == "offset"] <- "OFF"
+colnames(value_alt_offset)[colnames(value_alt_offset) == "value"] <- "offset"
+
+mdf <- merge(value_alt_omega, value_alt_lambda, by = c("sub","rr","pu"), all = TRUE) # Change 'all = TRUE' to do a full outer join, or 'all.x = TRUE' for a left outer join
+
+mdf <- merge(mdf, value_alt_offset, by = c("sub","rr","pu"), all = TRUE) # Change 'all = TRUE' to do a full outer join, or 'all.x = TRUE' for a left outer join
+mdf$model = 'value_alt'
+ndf <- mdf[, c("sub", "rr", "pu", "lambda", "omega","offset","model")] # Specify the column names you want to keep
+
+#write.csv(ndf, here::here('outputs', 'fitting', paste0("fittedparameters_valuemodel.csv")))
+```
+

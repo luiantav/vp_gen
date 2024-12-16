@@ -1,0 +1,315 @@
+---
+title: "Parameter recovery and correlation checks"
+author: "LV"
+date: "2024-01-10"
+output: html_document
+---
+
+# Get environment right
+```{r}
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load("renv", "here", "knitr", "dplyr")
+
+here::i_am("flag_project_root.R")
+here::here()
+data_path = here::here()
+
+#renv::activate(project=here::here())
+renv::restore(project=here::here()) #when asked to activate: NO!
+#renv::snapshot()
+
+packages <- c("ggplot2", "dplyr", "stats","lme4", "here", "renv","gtools", "see","plotrix","modelbased","emmeans", "performance", "tidyverse", "ggsignif","broom","quickpsy", "ggpubr", "performance","glmmTMB", "loo", "bayesplot","rlang","bayestestR", "rstan","brms","tidybayes","sjPlot","sjmisc","yardstick","effectsize","datawizard","esc","grid","lsr","gridExtra")
+
+# load the packages from lock 
+lapply(packages, library, character.only = TRUE)
+```
+
+
+
+# Get simulated data 
+```{r}
+
+# Set paths to files
+outs = here::here('outputs', 'param_recovery','JOINTRULES') #offset model, half sim Gauss and half Monotonic
+all_files <- list.files(path = outs, pattern = "\\.csv$", full.names = TRUE)
+csv_files <- all_files[grep(".csv", all_files, ignore.case = TRUE) &
+                       grepl("simfits", all_files, ignore.case = TRUE)]
+
+# Read in CSV files into a list of data frames
+data_list <- lapply(csv_files, read.csv)
+df2 <- do.call(rbind, data_list)
+```
+
+
+#Parameter recovery: Value model: Omega 
+```{r}
+omega_cols <- df2 %>%
+  select(contains(c("omega_value_alt_offset","sub", "iter")))
+
+omega = omega_cols %>% 
+  tidyr::pivot_longer(
+    cols = starts_with("omega_value"), 
+    names_to = "cond", 
+    values_drop_na = TRUE
+  )
+
+omega$io = NA
+omega$io[grepl("in", omega$cond)] <- "IN"
+omega$io[grepl("out", omega$cond)] <- "OUT"
+omega[] <- lapply(omega, function(x) gsub("omega_value_alt_offset_in", "", x))
+omega[] <- lapply(omega, function(x) gsub("omega_value_alt_offset_out", "", x))
+df_split <- tidyr::pivot_wider(omega, names_from = io, values_from = value)
+
+df_split$IN = as.numeric(df_split$IN)
+df_split$OUT = as.numeric(df_split$OUT)
+
+# Supplement figure, parameter recovery 
+dfsplit_means <- df_split %>% 
+  group_by(sub, cond) %>% 
+  summarise_at(c("IN","OUT"),funs(mean),na.rm = TRUE)
+
+ggplot(data=dfsplit_means, aes(x=as.factor(IN), y=as.numeric(OUT))) +geom_boxplot(width=0.2, fill = 'blue')+ geom_point()+theme_classic()+ theme(aspect.ratio = 1) +stat_cor(method = "spearman", label.x = 0, label.y = 0.1, size = 0.5, color = 'darkgrey')+xlab(expression(paste("Simulated ", Omega, "")))+ylab(expression(paste("Inferred ", Omega, "")))+theme(text = element_text(size = 20))+geom_violinhalf(position = position_nudge(x = .2, y = 0), alpha = 0.4, fill = 'blue')
+
+#ggsave(path = paste0(data_path, "/plots/Supplement"), width = 5, height = 5, filename = 'omega_recovery.png', device='png', dpi=700) 
+```
+
+#Parameter recovery: Value model: Lambda
+```{r}
+lambda_cols <- df2 %>%
+  select(contains(c("lambda_value_alt_offset","sub", "iter")))
+
+lambda = lambda_cols %>% 
+  tidyr::pivot_longer(
+    cols = starts_with("lambda_value_alt_offset"), 
+    names_to = "cond", 
+    values_drop_na = TRUE
+  )
+
+lambda$io = NA
+lambda$io[grepl("in", lambda$cond)] <- "IN"
+lambda$io[grepl("out", lambda$cond)] <- "OUT"
+lambda[] <- lapply(lambda, function(x) gsub("lambda_value_alt_offset_in", "", x))
+lambda[] <- lapply(lambda, function(x) gsub("lambda_value_alt_offset_out", "", x))
+df_split <- tidyr::pivot_wider(lambda, names_from = io, values_from = value)
+
+df_split$IN = as.numeric(df_split$IN)
+df_split$OUT = as.numeric(df_split$OUT)
+
+# Across iterations
+dfsplit_means <- df_split %>% 
+  group_by(sub, cond) %>% 
+  summarise_at(c("IN","OUT"),funs(mean),na.rm = TRUE)
+
+# Draw diagonal line, for visual clarity 
+dataa <- data.frame( 
+  x = c(0, 10),
+  y = c(0, 10)
+)
+
+# Supplement figure, parameter recovery
+ggplot(data=dfsplit_means, aes(x=as.numeric(IN), y=as.numeric(OUT)))+geom_line(data = dataa, aes(x=x, y = y), colour="blue", size=0.8) + geom_point()+ ylim(0,10)+xlim(0,10)+stat_cor(method = "spearman", label.x = 3, label.y = 0.8, size = 6, color = 'darkgrey')+ theme_classic() +theme(aspect.ratio = 1)+ylab(expression(paste("Inferred ", lambda, "")))+theme(aspect.ratio = 1)+xlab(expression(paste("Simulated ", lambda, "")))+theme(text = element_text(size = 20))
+#ggsave(path = paste0(data_path, "/plots/Supplement"), width = 5, height = 5, filename = 'lambda_recovery.png', device='png', dpi=700) 
+```
+
+#Parameter recovery: Value model: Alpha
+```{r}
+offset_cols <- df2 %>%
+  select(contains(c("offset_value_alt_offset","sub", "iter")))
+offset_cols <- offset_cols[, !grepl("ud", names(offset_cols))]
+
+offset = offset_cols %>% 
+  tidyr::pivot_longer(
+    cols = starts_with("offset_value_alt_offset"), 
+    names_to = "cond", 
+    values_drop_na = TRUE
+  )
+
+offset$io = NA
+offset$io[grepl("in", offset$cond)] <- "IN"
+offset$io[grepl("out", offset$cond)] <- "OUT"
+offset[] <- lapply(offset, function(x) gsub("offset_value_alt_offset_in", "", x))
+offset[] <- lapply(offset, function(x) gsub("offset_value_alt_offset_out", "", x))
+df_split <- tidyr::pivot_wider(offset, names_from = io, values_from = value)
+
+df_split$IN = as.numeric(df_split$IN)
+df_split$OUT = as.numeric(df_split$OUT)
+
+#across iterations
+dfsplit_means <- df_split %>% 
+  group_by(sub, cond) %>% 
+  summarise_at(c("IN","OUT"),funs(mean),na.rm = TRUE)
+
+dataa <- data.frame(
+  x = c(-0.3, 0.3),
+  y = c(-0.3, 0.3)
+)
+
+# Supplement figure, parameter recovery
+ggplot(data=dfsplit_means, aes(x=as.numeric(IN), y=as.numeric(OUT)))+geom_line(data = dataa, aes(x=x, y = y),colour="blue",size =0.8) + geom_point()+ ylim(-0.3,0.3)+xlim(-0.3,0.3)+theme_classic() +stat_cor(method = "spearman", label.x = 0, label.y = -0.2, size = 6, color = 'darkgrey')+stat_cor(method = "spearman", label.x = 3, label.y = 0.8, size = 6, color = 'darkgrey')+ theme_classic() +theme(aspect.ratio = 1)+ylab(expression(paste("Inferred ", alpha, "")))+theme(aspect.ratio = 1)+xlab(expression(paste("Simulated ", alpha, "")))+theme(text = element_text(size = 20))
+#ggsave(path = paste0(data_path, "/plots/Supplement"), width = 5, height = 5, filename = 'alpha_recovery.png', device='png', dpi=700) 
+```
+
+#Parameter recovery: Perceptual model: Rho
+```{r}
+rho_cols <- df2 %>%
+  select(contains(c("rho_perc_est","sub", "iter")))
+
+rho = rho_cols %>% 
+  tidyr::pivot_longer(
+    cols = starts_with("rho_perc_est"), 
+    names_to = "cond", 
+    values_drop_na = TRUE
+  )
+
+rho$io = NA
+rho$io[grepl("in", rho$cond)] <- "IN"
+rho$io[grepl("out", rho$cond)] <- "OUT"
+rho[] <- lapply(rho, function(x) gsub("rho_perc_est_in", "", x))
+rho[] <- lapply(rho, function(x) gsub("rho_perc_est_out", "", x))
+df_split <- tidyr::pivot_wider(rho, names_from = io, values_from = value)
+
+df_split$IN = as.numeric(df_split$IN)
+df_split$OUT = as.numeric(df_split$OUT)
+
+#across iterations
+dfsplit_means <- df_split %>% 
+  group_by(sub, cond) %>% 
+  summarise_at(c("IN","OUT"),funs(mean),na.rm = TRUE)
+
+dataa <- data.frame(
+  x = c(0, 1),
+  y = c(0, 1)
+)
+
+# Supplement figure, parameter recovery
+ggplot(data=dfsplit_means, aes(x=as.numeric(IN), y=as.numeric(OUT))) +geom_line(data = dataa, aes(x=x, y = y), colour="orange", size=0.8)+ geom_point()+ ylim(0,1)+theme_classic() +xlim(0,1) + theme(aspect.ratio = 1) +stat_cor(method = "spearman", label.x = 0.5, label.y = 0.1, size = 6, color = 'darkgrey')+xlab(expression(paste("Simulated ", rho, "")))+ylab(expression(paste("Inferred ", rho, "")))+theme(text = element_text(size = 20))
+#ggsave(path = paste0(data_path, "/plots/Supplement"), width = 5, height = 5, filename = 'rho_recovery.png', device='png', dpi=700) 
+```
+
+
+
+#Correlation of parameters input/output
+
+Input
+```{r}
+mod = c('value_alt_offset')
+params <- df2 %>% select(contains(c("value_alt_offset_inR","sub", "iter")))
+params <- params[, colSums(is.na(params)) == 0]
+params = params %>% group_by(sub) %>% summarise_all(mean)
+params <- params[, !(names(params) %in% c("sub", "iter"))]
+
+  lambda_data <- params %>%
+  pivot_longer(
+    cols = contains("lambda"), 
+    names_to = "lambda_type",    
+    values_to = "lambda"       
+  ) 
+
+  offset_data <- params %>%
+  pivot_longer(
+    cols = contains("offset"),     
+    names_to = "offset_type",      
+    values_to = "offset"        
+  ) 
+    
+  omega_data <- params %>%
+  pivot_longer(
+    cols = contains("omega"),    
+    names_to = "omega_type",   
+    values_to = "omega"      
+  ) # Select only the LAN values column
+
+  combined_data <- data.frame(
+  Lambda = lambda_data$lambda,
+  Offset = offset_data$offset,
+  Omega = omega_data$omega
+)
+  
+corr_mat <- round(cor(combined_data),2)
+
+melted_corr_mat <- melt(corr_mat)
+head(melted_corr_mat)
+
+p = ggplot(data = melted_corr_mat, aes(x=Var1, y=Var2, fill=value)) + 
+  geom_tile() +
+  geom_text(aes(Var2, Var1, label = value), size = 4, color = "white") +
+  scale_fill_gradient(low = "grey", high = "darkblue") + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  theme_classic() + 
+  theme(aspect.ratio = 1) +
+  labs(x = NULL, y = NULL) + 
+  ggtitle("IN") + 
+  theme(text = element_text(size = 20)) +
+  scale_x_discrete(labels = c('Lambda' = expression(lambda), 
+                              'Offset' = expression(alpha),
+                              'Omega' = expression(Omega))) + 
+  scale_y_discrete(labels = c('Lambda' = expression(lambda), 
+                              'Offset' = expression(alpha),
+                              'Omega' = expression(Omega)))
+p
+#ggsave(path = paste0(data_path, "/plots/Supplement"), width = 5, height = 5, filename = 'in_corrs.png', device='png', dpi=700) 
+```
+
+OUT OVERALL
+```{r}
+mod = c('value_alt_offset')
+params <- df2 %>% select(contains(c("value_alt_offset_outR","sub", "iter")))
+params <- params[, colSums(is.na(params)) == 0]
+params = params %>% group_by(sub) %>% summarise_all(mean)
+params <- params[, !(names(params) %in% c("sub", "iter"))]
+
+  lambda_data <- params %>%
+  pivot_longer(
+    cols = contains("lambda"),  
+    names_to = "lambda_type",    
+    values_to = "lambda"        
+  ) 
+
+  offset_data <- params %>%
+  pivot_longer(
+    cols = contains("offset"),     
+    names_to = "offset_type",      
+    values_to = "offset"          
+  ) 
+    
+  omega_data <- params %>%
+  pivot_longer(
+    cols = contains("omega"),     
+    names_to = "omega_type",     
+    values_to = "omega"       
+  ) 
+
+  combined_data <- data.frame(
+  Lambda = lambda_data$lambda,
+  Offset = offset_data$offset,
+  Omega = omega_data$omega
+)
+  
+  corr_mat <- round(cor(combined_data),2)
+
+  melted_corr_mat <- melt(corr_mat)
+  head(melted_corr_mat)
+
+
+p = ggplot(data = melted_corr_mat, aes(x=Var1, y=Var2, fill=value)) + 
+  geom_tile() +
+  geom_text(aes(Var2, Var1, label = value), size = 4, color = "white") +
+  scale_fill_gradient(low = "grey", high = "darkblue") + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  theme_classic() + 
+  theme(aspect.ratio = 1) +
+  labs(x = NULL, y = NULL) + 
+  ggtitle("OUT") + 
+  theme(text = element_text(size = 20)) +
+  scale_x_discrete(labels = c('Lambda' = expression(lambda), 
+                              'Offset' = expression(alpha),
+                              'Omega' = expression(Omega))) + 
+  scale_y_discrete(labels = c('Lambda' = expression(lambda), 
+                              'Offset' = expression(alpha),
+                              'Omega' = expression(Omega)))
+
+p
+#ggsave(path = paste0(data_path, "/plots/Supplement"), width = 5, height = 5, filename = 'out_corrs.png', device='png', dpi=700) 
+```
+
+
