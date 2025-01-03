@@ -21,7 +21,7 @@ Scripts tested on
 - macOS Monterey 12.7.6
 
 Expected runtime
-<5 for behavioural and modelling output analysis. Raw files of model fitting, parameter and model recovery are provided. 
+<5 min for behavioural and modelling output analysis. Raw files of model fitting, parameter and model recovery are provided. 
 
 
 
