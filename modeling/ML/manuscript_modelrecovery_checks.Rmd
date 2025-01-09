@@ -65,7 +65,7 @@ df2 <- df2 %>% select(where(~ !all(is.na(.))))
 all_cols = c()
 
 # All model combinations of interest
-all_combi = c("BIC_perc_est_perc_est", "BIC_perc_est_value_alt_offset", "BIC_perc_est_full_alt_offset_gen", "BIC_value_alt_offset_perc_est", "BIC_value_alt_offset_value_alt_offset", "BIC_value_alt_offset_full_alt_offset_gen", "BIC_full_alt_offset_gen_perc_est", "BIC_full_alt_offset_gen_value_alt_offset", "BIC_full_alt_offset_gen_full_alt_offset_gen", "BIC_perc_est_ns2", "BIC_value_alt_offset_ns2", "BIC_full_alt_offset_gen_ns2", "BIC_ns2_ns2", "BIC_ns2_value_alt_offset", "BIC_ns2_full_alt_offset_gen","BIC_ns2_perc_est")
+all_combi = c("BIC_perc_est_perc_est", "BIC_perc_est_value_alt_offset", "BIC_value_alt_offset_perc_est", "BIC_value_alt_offset_value_alt_offset")
 
 # Group by subject and combination, then find the minimum for each combination
 df2 <- df2 %>%

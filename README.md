@@ -19,6 +19,7 @@ All data needed for behavioural analyses are provided in `data` folder. Raw mode
 
 Scripts tested on
 - macOS Monterey 12.7.6
+- Ubuntu 20.04
 
 Expected runtime
 <5 min for behavioural and modelling output analysis. Raw files of model fitting, parameter and model recovery are provided. 
